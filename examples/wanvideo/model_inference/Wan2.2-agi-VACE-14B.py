@@ -294,8 +294,10 @@ def load_pipe(base_model_paths, vace_model_path, device):
         device=device,
         model_configs=model_configs,
     )
-    state_dict = load_state_dict("/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-14B/epoch-17.safetensors")
-    pipe.vace.load_state_dict(state_dict)
+    # Load VACE weights if provided
+    if vace_model_path:
+        state_dict = load_state_dict(vace_model_path)
+        pipe.vace.load_state_dict(state_dict)
     return pipe
 
 
@@ -425,17 +427,19 @@ def main():
     parser.add_argument("--gpu_ids", type=str, default="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15", help="Comma-separated GPU ids, e.g. 0,1,2,3")
     parser.add_argument(
         "--base_model_paths",
+        nargs="+",
         default=[
-            "["/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00001-of-00007.safetensors", \
-            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00002-of-00007.safetensors", \
-            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00003-of-00007.safetensors", \
-            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00004-of-00007.safetensors", \
-            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00005-of-00007.safetensors", \
-            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00006-of-00007.safetensors", \
-            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00007-of-00007.safetensors"]"
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00001-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00002-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00003-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00004-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00005-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00006-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00007-of-00007.safetensors",
             "/mnt/workspace/zsq/Wan_model/Wan2.2-Fun-A14B-Control/models_t5_umt5-xxl-enc-bf16.pth",
             "/mnt/workspace/zsq/Wan_model/Wan2.2-Fun-A14B-Control/Wan2.1_VAE.pth",
         ],
+        help="List of base model file paths (space-separated).",
     )
     parser.add_argument("--vace_model_path",default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-14B/epoch-17.safetensors")
     args = parser.parse_args()
