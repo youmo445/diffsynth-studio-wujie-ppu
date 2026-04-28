@@ -238,9 +238,11 @@ diffsynth/tokenizer_configs/stable_diffusion_xl/tokenizer_2/special_tokens_map.j
 diffsynth/tokenizer_configs/stable_diffusion_xl/tokenizer_2/tokenizer_config.json
 diffsynth/tokenizer_configs/stable_diffusion_xl/tokenizer_2/vocab.json
 diffsynth/trainers/__init__.py
+diffsynth/trainers/test_dataset.py
 diffsynth/trainers/text_to_image.py
 diffsynth/trainers/unified_dataset.py
 diffsynth/trainers/utils.py
+diffsynth/trainers/utils_codex.py
 diffsynth/utils/__init__.py
 diffsynth/vram_management/__init__.py
 diffsynth/vram_management/gradient_checkpointing.py

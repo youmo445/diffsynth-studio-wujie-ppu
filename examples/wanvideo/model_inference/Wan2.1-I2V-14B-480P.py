@@ -7,12 +7,18 @@ from modelscope import dataset_snapshot_download
 
 pipe = WanVideoPipeline.from_pretrained(
     torch_dtype=torch.bfloat16,
-    device="cuda",
+    device="cuda:0",
     model_configs=[
-        ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="diffusion_pytorch_model*.safetensors", offload_device="cpu"),
-        ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
-        ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
-        ModelConfig(model_id="Wan-AI/Wan2.1-I2V-14B-480P", origin_file_pattern="models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth", offload_device="cpu"),
+        ModelConfig(path=["/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-00001-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-00002-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-00003-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-00004-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-00005-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-00006-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/diffusion_pytorch_model-00007-of-00007.safetensors",]),
+        ModelConfig(path="/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
+        ModelConfig(path="/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/models_t5_umt5-xxl-enc-bf16.pth"),
+        ModelConfig(path="/mnt/workspace/zsq/Wan_model/Wan2.1-I2V-14B-480P/Wan2.1_VAE.pth"),
     ],
 )
 pipe.enable_vram_management()

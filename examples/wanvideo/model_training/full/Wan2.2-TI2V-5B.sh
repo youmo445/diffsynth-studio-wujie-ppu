@@ -1,10 +1,8 @@
-accelerate launch examples/wanvideo/model_training/train.py \
-  --dataset_base_path data/example_video_dataset \
-  --dataset_metadata_path data/example_video_dataset/metadata.csv \
-  --height 480 \
-  --width 832 \
-  --num_frames 49 \
-  --dataset_repeat 100 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 accelerate launch \
+  --config_file /mnt/workspace/zsq/DiffSynth-Studio/examples/wanvideo/model_training/full/accelerate_config_14B.yaml \
+  /mnt/workspace/zsq/DiffSynth-Studio/examples/wanvideo/model_training/train.py \
+  --num_frames 9 \
+  --dataset_repeat 1 \
   --model_id_with_origin_paths "Wan-AI/Wan2.2-TI2V-5B:diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.2-TI2V-5B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.2-TI2V-5B:Wan2.2_VAE.pth" \
   --learning_rate 1e-5 \
   --num_epochs 2 \

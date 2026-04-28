@@ -66,7 +66,7 @@ class WanVideoPipeline(BasePipeline):
             WanVideoUnit_FunReference(),
             WanVideoUnit_FunCameraControl(),
             WanVideoUnit_SpeedControl(),
-            WanVideoUnit_VACE(),
+            WanVideoUnit_VACE_raymap(),
             WanVideoPostUnit_AnimateVideoSplit(),
             WanVideoPostUnit_AnimatePoseLatents(),
             WanVideoPostUnit_AnimateFacePixelValues(),
@@ -453,6 +453,8 @@ class WanVideoPipeline(BasePipeline):
         vace_video: Optional[list[Image.Image]] = None,
         vace_video_mask: Optional[Image.Image] = None,
         vace_reference_image: Optional[Image.Image] = None,
+        ray_map_o: Optional[list[Image.Image]] = None,
+        ray_map_d: Optional[list[Image.Image]] = None,
         vace_scale: Optional[float] = 1.0,
         # Animate
         animate_pose_video: Optional[list[Image.Image]] = None,
@@ -515,7 +517,8 @@ class WanVideoPipeline(BasePipeline):
             "input_video": input_video, "denoising_strength": denoising_strength,
             "control_video": control_video, "reference_image": reference_image,
             "camera_control_direction": camera_control_direction, "camera_control_speed": camera_control_speed, "camera_control_origin": camera_control_origin,
-            "vace_video": vace_video, "vace_video_mask": vace_video_mask, "vace_reference_image": vace_reference_image, "vace_scale": vace_scale,
+            "vace_video": vace_video, "vace_video_mask": vace_video_mask, "vace_reference_image": vace_reference_image,
+            "ray_map_o": ray_map_o, "ray_map_d": ray_map_d, "vace_scale": vace_scale,
             "seed": seed, "rand_device": rand_device,
             "height": height, "width": width, "num_frames": num_frames,
             "cfg_scale": cfg_scale, "cfg_merge": cfg_merge,
@@ -723,16 +726,17 @@ class WanVideoUnit_ImageEmbedderCLIP(PipelineUnit):
 class WanVideoUnit_ImageEmbedderVAE(PipelineUnit):
     def __init__(self):
         super().__init__(
-            input_params=("input_image", "end_image", "num_frames", "height", "width", "tiled", "tile_size", "tile_stride"),
+            input_params=("input_image", "end_image", "num_frames","modified_mask", "height", "width", "tiled", "tile_size", "tile_stride"),
             onload_model_names=("vae",)
         )
 
-    def process(self, pipe: WanVideoPipeline, input_image, end_image, num_frames, height, width, tiled, tile_size, tile_stride):
+    def process(self, pipe: WanVideoPipeline, input_image, end_image, num_frames, modified_mask, height, width, tiled, tile_size, tile_stride):
         if input_image is None or not pipe.dit.require_vae_embedding:
             return {}
         pipe.load_models_to_device(self.onload_model_names)
         image = pipe.preprocess_image(input_image.resize((width, height))).to(pipe.device)
         msk = torch.ones(1, num_frames, height//8, width//8, device=pipe.device)
+        # print(f'msk:{msk.shape}') 
         msk[:, 1:] = 0
         if end_image is not None:
             end_image = pipe.preprocess_image(end_image.resize((width, height))).to(pipe.device)
@@ -740,16 +744,20 @@ class WanVideoUnit_ImageEmbedderVAE(PipelineUnit):
             msk[:, -1:] = 1
         else:
             vae_input = torch.concat([image.transpose(0, 1), torch.zeros(3, num_frames-1, height, width).to(image.device)], dim=1)
-
+            # print(f'vae_input:{vae_input.shape}') # 下采样8
         msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]], dim=1)
+        # print(f'msk:{msk.shape}')
         msk = msk.view(1, msk.shape[1] // 4, 4, height//8, width//8)
         msk = msk.transpose(1, 2)[0]
+        # print(f'msk:{msk.shape}') # [4, t',h ,w]
         
         y = pipe.vae.encode([vae_input.to(dtype=pipe.torch_dtype, device=pipe.device)], device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)[0]
         y = y.to(dtype=pipe.torch_dtype, device=pipe.device)
+        print(f'y:{y.shape}') # [c, t',h, w]
         y = torch.concat([msk, y])
         y = y.unsqueeze(0)
         y = y.to(dtype=pipe.torch_dtype, device=pipe.device)
+        print(f'y:{y.shape}')
         return {"y": y}
 
 
@@ -909,23 +917,27 @@ class WanVideoUnit_VACE(PipelineUnit):
                 vace_video = torch.zeros((1, 3, num_frames, height, width), dtype=pipe.torch_dtype, device=pipe.device)
             else:
                 vace_video = pipe.preprocess_video(vace_video)
-            
+                print(f'vace_video:{vace_video.shape}')
+                # [1, 3, T=9, H, W]
             if vace_video_mask is None:
                 # print(f'vace_video_mask is none')
                 vace_video_mask = torch.ones_like(vace_video)
-                # print(f'vace_video_mask:{vace_video_mask.shape}') # [1, 3, 81, 480, 832]
+                # print(f'vace_video_mask:{vace_video_mask.shape}') # [1, 3, T=9, 480, 832]
             else:
                 vace_video_mask = pipe.preprocess_video(vace_video_mask, min_value=0, max_value=1)
             
-            inactive = vace_video * (1 - vace_video_mask) + 0 * vace_video_mask
-            reactive = vace_video * vace_video_mask + 0 * (1 - vace_video_mask)
+            inactive = vace_video * (1 - vace_video_mask) + 0 * vace_video_mask # 0 shape: [1, 3, T=9, H, W]
+            reactive = vace_video * vace_video_mask + 0 * (1 - vace_video_mask) # 1 shape: [1, 3, T=9, H, W]
             inactive = pipe.vae.encode(inactive, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
+            # [1, c=16, T'=3, H', W']
             reactive = pipe.vae.encode(reactive, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
             vace_video_latents = torch.concat((inactive, reactive), dim=1)
-            print(f'vace_video_latents:{vace_video_latents.shape}') # [1, 32, 21, 60, 104]
+            # [1, c=32, T'=3, H', W']
+            print(f'vace_video_latents:{vace_video_latents.shape}') # [1, 32, T'=3, 60, 104]
             vace_mask_latents = rearrange(vace_video_mask[0,0], "T (H P) (W Q) -> 1 (P Q) T H W", P=8, Q=8)
-            # [81, (60, 8), (104, 8)] ---> [1, (8, 8), 81, 60, 104]
+            # [T=9, (60, 8), (104, 8)] ---> [1, (8, 8), 81, 60, 104]-[1, 64, T=9, H', W']
             vace_mask_latents = torch.nn.functional.interpolate(vace_mask_latents, size=((vace_mask_latents.shape[2] + 3) // 4, vace_mask_latents.shape[3], vace_mask_latents.shape[4]), mode='nearest-exact')
+            # [1, 64, T', H', W']
             # print(f'vace_mask_latents:{vace_mask_latents.shape}') # [1, 64, 21, 60, 104]
             if vace_reference_image is None:
                 pass
@@ -942,10 +954,10 @@ class WanVideoUnit_VACE(PipelineUnit):
                 vace_reference_image = new_vace_ref_images
                 vace_reference_latents = pipe.vae.encode(vace_reference_image, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
                 vace_reference_latents = torch.concat((vace_reference_latents, torch.zeros_like(vace_reference_latents)), dim=1)
-                # print(f'vace_reference_latents:{vace_reference_latents.shape}') # [1, 32, 1, 60, 104]
+                # print(f'vace_reference_latents:{vace_reference_latents.shape}') # [1, 32, 1, 60, 104] [1, 32, T_ref=1, H', W']
                 # 分两部分是为了和前面对齐
                 vace_reference_latents = [u.unsqueeze(0) for u in vace_reference_latents]
-
+                # import pdb;pdb.set_trace()
                 vace_video_latents = torch.concat((*vace_reference_latents, vace_video_latents), dim=2)
                 # print(f'vace_video_latents:{vace_video_latents.shape}') # [1, 32, 22, 60, 104]
                 vace_mask_latents = torch.concat((torch.zeros_like(vace_mask_latents[:, :, :f]), vace_mask_latents), dim=2)
@@ -955,6 +967,107 @@ class WanVideoUnit_VACE(PipelineUnit):
             return {"vace_context": vace_context, "vace_scale": vace_scale}
         else:
             return {"vace_context": None, "vace_scale": vace_scale}
+
+
+class WanVideoUnit_VACE_raymap(WanVideoUnit_VACE):
+    def __init__(self):
+        PipelineUnit.__init__(
+            self,
+            input_params=(
+                "vace_video", "vace_video_mask", "vace_reference_image",
+                "ray_map_o", "ray_map_d",
+                "vace_scale", "height", "width", "num_frames",
+                "tiled", "tile_size", "tile_stride",
+            ),
+            onload_model_names=("vae",),
+        )
+
+    def _encode_video_latents(self, pipe, video, tiled, tile_size, tile_stride):
+        video = pipe.preprocess_video(video)
+        return pipe.vae.encode(
+            video,
+            device=pipe.device,
+            tiled=tiled,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+        ).to(dtype=pipe.torch_dtype, device=pipe.device)
+
+    def _mask_latents(self, vace_video_mask, mask_channels=64):
+        vace_mask_latents = rearrange(vace_video_mask[0, 0], "T (H P) (W Q) -> 1 (P Q) T H W", P=8, Q=8)
+        vace_mask_latents = torch.nn.functional.interpolate(
+            vace_mask_latents,
+            size=((vace_mask_latents.shape[2] + 3) // 4, vace_mask_latents.shape[3], vace_mask_latents.shape[4]),
+            mode="nearest-exact",
+        )
+        if mask_channels == 32:
+            b, c, t, h, w = vace_mask_latents.shape
+            vace_mask_latents = vace_mask_latents.reshape(b, 32, 2, t, h, w).amax(dim=2)
+        return vace_mask_latents
+
+    def process(
+        self,
+        pipe: WanVideoPipeline,
+        vace_video, vace_video_mask, vace_reference_image,
+        ray_map_o, ray_map_d,
+        vace_scale,
+        height, width, num_frames,
+        tiled, tile_size, tile_stride,
+    ):
+        if ray_map_o is None and ray_map_d is None:
+            return super().process(
+                pipe,
+                vace_video, vace_video_mask, vace_reference_image, vace_scale,
+                height, width, num_frames,
+                tiled, tile_size, tile_stride,
+            )
+        if ray_map_o is None or ray_map_d is None:
+            raise ValueError("ray_map_o and ray_map_d must be provided together.")
+        if vace_video is None and vace_video_mask is None and vace_reference_image is None:
+            return {"vace_context": None, "vace_scale": vace_scale}
+
+        pipe.load_models_to_device(["vae"])
+        if vace_video is None:
+            vace_video = torch.zeros((1, 3, num_frames, height, width), dtype=pipe.torch_dtype, device=pipe.device)
+        else:
+            vace_video = pipe.preprocess_video(vace_video)
+
+        if vace_video_mask is None:
+            vace_video_mask = torch.ones_like(vace_video)
+        else:
+            vace_video_mask = pipe.preprocess_video(vace_video_mask, min_value=0, max_value=1)
+
+        inactive = vace_video * (1 - vace_video_mask) + 0 * vace_video_mask
+        reactive = vace_video * vace_video_mask + 0 * (1 - vace_video_mask)
+        inactive = pipe.vae.encode(inactive, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
+        reactive = pipe.vae.encode(reactive, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
+        ray_map_o_latents = self._encode_video_latents(pipe, ray_map_o, tiled, tile_size, tile_stride)
+        ray_map_d_latents = self._encode_video_latents(pipe, ray_map_d, tiled, tile_size, tile_stride)
+
+        vace_video_latents = torch.concat((inactive, reactive, ray_map_o_latents, ray_map_d_latents), dim=1)
+        vace_mask_latents = self._mask_latents(vace_video_mask, mask_channels=32)
+
+        if vace_reference_image is not None:
+            if not isinstance(vace_reference_image, list):
+                vace_reference_image = [vace_reference_image]
+            vace_reference_image = pipe.preprocess_video(vace_reference_image)
+            bs, c, f, h, w = vace_reference_image.shape
+            new_vace_ref_images = []
+            for j in range(f):
+                new_vace_ref_images.append(vace_reference_image[0, :, j:j + 1])
+            vace_reference_latents = pipe.vae.encode(
+                new_vace_ref_images,
+                device=pipe.device,
+                tiled=tiled,
+                tile_size=tile_size,
+                tile_stride=tile_stride,
+            ).to(dtype=pipe.torch_dtype, device=pipe.device)
+            vace_reference_latents = torch.concat((vace_reference_latents, torch.zeros_like(vace_reference_latents).repeat(1, 3, 1, 1, 1)), dim=1)
+            vace_reference_latents = [u.unsqueeze(0) for u in vace_reference_latents]
+            vace_video_latents = torch.concat((*vace_reference_latents, vace_video_latents), dim=2)
+            vace_mask_latents = torch.concat((torch.zeros_like(vace_mask_latents[:, :, :f]), vace_mask_latents), dim=2)
+
+        vace_context = torch.concat((vace_video_latents, vace_mask_latents), dim=1)
+        return {"vace_context": vace_context, "vace_scale": vace_scale}
 
 class WanVideoUnit_VAP(PipelineUnit):
     def __init__(self):
@@ -1492,6 +1605,7 @@ def model_fn_wan_video(
     context = dit.text_embedding(context)
 
     x = latents
+    print(f'---x:{x.shape}')
     # Merged cfg
     if x.shape[0] != context.shape[0]:
         x = torch.concat([x] * context.shape[0], dim=0)
@@ -1527,11 +1641,11 @@ def model_fn_wan_video(
         x = torch.concat([reference_latents, x], dim=1)
         print(f'x:{x.shape}')
         f += 1
-    
+    print(f'x:{x.shape}')
     freqs = torch.cat([
-        dit.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-        dit.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-        dit.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        dit.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1), # frame方向的频率编码
+        dit.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1), # height方向的频率编码
+        dit.freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)  # width方向的频率编码
     ], dim=-1).reshape(f * h * w, 1, -1).to(x.device)
 
     # VAP 

@@ -227,6 +227,7 @@ class DiTBlock(nn.Module):
         x = x + self.cross_attn(self.norm3(x), context)
         input_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = self.gate(x, gate_mlp, self.ffn(input_x))
+        # import pdb;pdb.set_trace()
         return x
 
 

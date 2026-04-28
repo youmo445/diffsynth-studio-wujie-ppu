@@ -407,11 +407,11 @@ def worker_main(rank, gpu_ids, assignments, args_dict):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--val_path", type=str, default="/mnt/workspace/zsq/Agibotsubset/val")
-    parser.add_argument("--output_dir", type=str, default="/mnt/workspace/zsq/Agibotsubset/val_results_A14B_control")
+    parser.add_argument("--output_dir", type=str, default="/mnt/workspace/zsq/Agibotsubset/val_results_A14B_control_50steps")
     parser.add_argument("--original_hz", type=int, default=30)
     parser.add_argument("--target_hz", type=int, default=5)
     parser.add_argument("--predict_frames", type=int, default=8)
-    parser.add_argument("--num_inference_steps", type=int, default=5)
+    parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--cfg_scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--H", type=int, default=320)
@@ -425,8 +425,8 @@ def main():
         "--model_paths",
         nargs=4,
         default=[
-            "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-Fun-A14B-Control_high_niose_full/epoch-94.safetensors",
-            "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-Fun-A14B-Control_low_niose_full/epoch-93.safetensors",
+            "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-Fun-A14B-Control_high_niose_full_continue/epoch-49.safetensors",
+            "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-Fun-A14B-Control_low_niose_full_continue/epoch-49.safetensors",
             "/mnt/workspace/zsq/Wan_model/Wan2.2-Fun-A14B-Control/models_t5_umt5-xxl-enc-bf16.pth",
             "/mnt/workspace/zsq/Wan_model/Wan2.2-Fun-A14B-Control/Wan2.1_VAE.pth",
         ],

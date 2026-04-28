@@ -358,7 +358,7 @@ def run_episode(pipe, args, ep_key, ep_paths, worker_prefix):
         generated = pipe(
             prompt=args.prompt,
             vace_video=control_video,
-            reference_image=current_context,
+            vace_reference_image=current_context,
             height=args.H,
             width=args.W,
             num_frames=fixed_num_frames,
@@ -411,37 +411,37 @@ def worker_main(rank, gpu_ids, assignments, args_dict):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--val_path", type=str, default="/mnt/workspace/zsq/Agibotsubset/val")
-    parser.add_argument("--output_dir", type=str, default="/mnt/workspace/zsq/Agibotsubset/val_results_VACE-14B")
+    parser.add_argument("--output_dir", type=str, default="/mnt/workspace/zsq/Agibotsubset/val_results_VACE-14B_50steps")
     parser.add_argument("--original_hz", type=int, default=30)
     parser.add_argument("--target_hz", type=int, default=5)
     parser.add_argument("--predict_frames", type=int, default=8)
-    parser.add_argument("--num_inference_steps", type=int, default=5)
+    parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--cfg_scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--H", type=int, default=320)
     parser.add_argument("--W", type=int, default=512)
     parser.add_argument("--traj_radius", type=int, default=50)
     parser.add_argument("--fps", type=int, default=15)
-    parser.add_argument("--prompt", type=str, default="机械臂的两个臂执行动作")
+    parser.add_argument("--prompt", type=str, default="机械臂按照要求移动夹爪执行任务")
     parser.add_argument("--episode_filter", type=str, default=None)
     parser.add_argument("--gpu_ids", type=str, default="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15", help="Comma-separated GPU ids, e.g. 0,1,2,3")
     parser.add_argument(
         "--base_model_paths",
         nargs="+",
         default=[
-            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00001-of-00007.safetensors",
+            ["/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00001-of-00007.safetensors",
             "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00002-of-00007.safetensors",
             "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00003-of-00007.safetensors",
             "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00004-of-00007.safetensors",
             "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00005-of-00007.safetensors",
             "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00006-of-00007.safetensors",
-            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00007-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00007-of-00007.safetensors",],
             "/mnt/workspace/zsq/Wan_model/Wan2.2-Fun-A14B-Control/models_t5_umt5-xxl-enc-bf16.pth",
             "/mnt/workspace/zsq/Wan_model/Wan2.2-Fun-A14B-Control/Wan2.1_VAE.pth",
         ],
         help="List of base model file paths (space-separated).",
     )
-    parser.add_argument("--vace_model_path",default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-14B/epoch-17.safetensors")
+    parser.add_argument("--vace_model_path",default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-14B/epoch-49.safetensors")
     args = parser.parse_args()
 
     if args.predict_frames <= 0:

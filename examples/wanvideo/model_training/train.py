@@ -3,7 +3,7 @@ from diffsynth import load_state_dict
 from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig
 from diffsynth.trainers.utils import DiffusionTrainingModule, ModelLogger, launch_training_task, wan_parser
 from diffsynth.trainers.unified_dataset import UnifiedDataset, LoadVideo, LoadAudio, ImageCropAndResize, ToAbsolutePath
-from diffsynth.trainers.utils import AgiBotWCDataset4WanControl
+from diffsynth.trainers.utils import AgiBotWCDataset4WanControl, AgiBotWCDataset4WanControlmultiview
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
@@ -123,6 +123,21 @@ if __name__ == "__main__":
         )
         val_dataset = AgiBotWCDataset4WanControl(
             base_path="/mnt/workspace/zsq/Agibotsubset/val",
+            num_frames = args.num_frames,
+            context_length = 1,
+            repeat=args.dataset_repeat,
+            dataset_type = 'vace'
+        )
+    elif args.dataset == "AgisubDatasetvacemultiview":
+        dataset = AgiBotWCDataset4WanControlmultiview(
+            base_path="/mnt/workspace/zsq/Agi2024subset_split/train",
+            num_frames = args.num_frames,
+            context_length = 1,
+            repeat=args.dataset_repeat,
+            dataset_type = 'vace'
+        )
+        val_dataset = AgiBotWCDataset4WanControlmultiview(
+            base_path="/mnt/workspace/zsq/Agi2024subset_split/val",
             num_frames = args.num_frames,
             context_length = 1,
             repeat=args.dataset_repeat,

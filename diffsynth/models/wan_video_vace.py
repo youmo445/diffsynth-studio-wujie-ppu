@@ -11,6 +11,7 @@ class VaceWanAttentionBlock(DiTBlock):
         self.after_proj = torch.nn.Linear(self.dim, self.dim)
 
     def forward(self, c, x, context, t_mod, freqs):
+        # import pdb;pdb.set_trace()
         if self.block_id == 0:
             c = self.before_proj(c) + x
             all_c = []
@@ -61,7 +62,6 @@ class VaceWanModel(torch.nn.Module):
             torch.cat([u, u.new_zeros(1, x.shape[1] - u.size(1), u.size(2))],
                       dim=1) for u in c
         ])
-        
         def create_custom_forward(module):
             def custom_forward(*inputs):
                 return module(*inputs)
@@ -83,6 +83,7 @@ class VaceWanModel(torch.nn.Module):
                 )
             else:
                 c = block(c, x, context, t_mod, freqs)
+        # import pdb;pdb.set_trace()
         hints = torch.unbind(c)[:-1]
         return hints
     

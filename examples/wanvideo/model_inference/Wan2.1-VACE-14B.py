@@ -9,13 +9,13 @@ pipe = WanVideoPipeline.from_pretrained(
     torch_dtype=torch.bfloat16,
     device="cuda:0",
     model_configs=[
-        ModelConfig(path="[/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00001-of-00007.safetensors" \
-        "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00002-of-00007.safetensors" \
-        "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00003-of-00007.safetensors" \
-        "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00004-of-00007.safetensors" \
-        "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00005-of-00007.safetensors" \
-        "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00006-of-00007.safetensors" \
-        "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00007-of-00007.safetensors]"),
+        ModelConfig(path=["/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00001-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00002-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00003-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00004-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00005-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00006-of-00007.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/diffusion_pytorch_model-00007-of-00007.safetensors",],),
         ModelConfig(path="/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/models_t5_umt5-xxl-enc-bf16.pth"),
         ModelConfig(path="/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/Wan2.1_VAE.pth"),
     ],
@@ -25,8 +25,8 @@ pipe = WanVideoPipeline.from_pretrained(
 pipe.enable_vram_management()
 H = 320
 W = 512
-control_video = VideoData("/mnt/workspace/zsq/DiffSynth-Studio/examples/wanvideo/model_inference/data/examples/agi/action_map.mp4", height=H, width=W)
-reference_image = Image.open("/mnt/workspace/zsq/DiffSynth-Studio/examples/wanvideo/model_inference/data/examples/agi/first_frame.png").resize((H, W))
+control_video = VideoData("/mnt/workspace/zsq/DiffSynth-Studio/examples/wanvideo/model_inference/data/examples/agi/action_map_trim.mp4", height=H, width=W)
+reference_image = Image.open("/mnt/workspace/zsq/DiffSynth-Studio/examples/wanvideo/model_inference/data/examples/agi/first_frame.png").resize((W, H))
 # dataset_snapshot_download(
 #     dataset_id="DiffSynth-Studio/examples_in_diffsynth",
 #     local_dir="./",
