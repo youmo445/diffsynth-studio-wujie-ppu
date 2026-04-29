@@ -20,6 +20,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         extra_inputs=None,
         max_timestep_boundary=1.0,
         min_timestep_boundary=0.0,
+        enable_vace_global_cross_attn=False,
     ):
         super().__init__()
         # Load models
@@ -34,11 +35,19 @@ class WanTrainingModule(DiffusionTrainingModule):
             lora_base_model, lora_target_modules, lora_rank, lora_checkpoint=lora_checkpoint,
             enable_fp8_training=False,
         )
+        if enable_vace_global_cross_attn:
+            if self.pipe.vace is None:
+                raise ValueError("--enable_vace_global_cross_attn requires a VACE model.")
+            self.pipe.vace.enable_global_cross_attn(global_context_dim=16)
+            if self.pipe.vace2 is not None:
+                self.pipe.vace2.enable_global_cross_attn(global_context_dim=16)
         
         # Store other configs
         self.use_gradient_checkpointing = use_gradient_checkpointing
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
+        if enable_vace_global_cross_attn and "vace_global_reference_images" not in self.extra_inputs:
+            self.extra_inputs.append("vace_global_reference_images")
         self.max_timestep_boundary = max_timestep_boundary
         self.min_timestep_boundary = min_timestep_boundary
         
@@ -125,6 +134,18 @@ if __name__ == "__main__":
         choices=("constant", "perspective", "depth_norm"),
         help="Trajectory point radius mode for codex multiview dataset",
     )
+    parser.add_argument(
+        "--dataset_raymap_mode",
+        type=str,
+        default="image",
+        choices=("image", "latent"),
+        help="Use image raymaps encoded by VAE or latent-resolution raw raymaps from the dataset.",
+    )
+    parser.add_argument(
+        "--enable_vace_global_cross_attn",
+        action="store_true",
+        help="Encode all-view reference images with Wan VAE and let VACE tokens cross-attend them.",
+    )
     args = parser.parse_args()
     val_camera_sample_mode = args.dataset_val_camera_sample_mode or args.dataset_camera_sample_mode
 
@@ -166,6 +187,8 @@ if __name__ == "__main__":
             repeat=args.dataset_repeat,
             dataset_type = 'vace',
             output_raymap=args.dataset_output_raymap,
+            raymap_mode=args.dataset_raymap_mode,
+            output_global_reference=args.enable_vace_global_cross_attn,
             traj_radius_mode=args.dataset_traj_radius_mode,
             camera_names=args.dataset_camera_names,
             camera_sample_mode=args.dataset_camera_sample_mode,
@@ -177,6 +200,8 @@ if __name__ == "__main__":
             repeat=args.dataset_repeat,
             dataset_type = 'vace',
             output_raymap=args.dataset_output_raymap,
+            raymap_mode=args.dataset_raymap_mode,
+            output_global_reference=args.enable_vace_global_cross_attn,
             traj_radius_mode=args.dataset_traj_radius_mode,
             camera_names=args.dataset_camera_names,
             camera_sample_mode=val_camera_sample_mode,
@@ -218,6 +243,7 @@ if __name__ == "__main__":
         extra_inputs=args.extra_inputs,
         max_timestep_boundary=args.max_timestep_boundary,
         min_timestep_boundary=args.min_timestep_boundary,
+        enable_vace_global_cross_attn=args.enable_vace_global_cross_attn,
     )
     model_logger = ModelLogger(
         args.output_path,

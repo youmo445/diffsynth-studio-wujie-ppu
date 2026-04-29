@@ -287,10 +287,12 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
         ray_o_vmax=1.5,
         ray_d_vmin=-1.0,
         ray_d_vmax=1.0,
+        raymap_mode="image",
         resize_to=(320, 512),
         dataset_type="vace",
         camera_names=None,
         camera_sample_mode="all",
+        output_global_reference=False,
     ):
         super().__init__()
         if original_hz % target_hz != 0:
@@ -299,6 +301,8 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
             camera_names = ["head", "hand_left", "hand_right"]
         if camera_sample_mode not in ("all", "random_one", "cycle_one"):
             raise ValueError(f"Unsupported camera_sample_mode: {camera_sample_mode}")
+        if raymap_mode not in ("image", "latent"):
+            raise ValueError(f"Unsupported raymap_mode: {raymap_mode}")
 
         self.base_path = base_path
         if os.path.normpath(base_path).startswith(os.path.normpath("/mnt/workspace/zsq/Agi2024subset_split")):
@@ -327,11 +331,15 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
         self.ray_o_vmax = ray_o_vmax
         self.ray_d_vmin = ray_d_vmin
         self.ray_d_vmax = ray_d_vmax
+        self.raymap_mode = raymap_mode
+        self.vae_spatial_downsample = 8
+        self.vae_temporal_downsample = 4
         self.resize_to = resize_to
         self.load_from_cache = False
         self.type = dataset_type
         self.camera_names = list(camera_names)
         self.camera_sample_mode = camera_sample_mode
+        self.output_global_reference = output_global_reference
         self.downsample_step = original_hz // target_hz
 
         print(
@@ -578,6 +586,38 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
         rays_o = np.broadcast_to(translation, rays_d.shape).copy()
         return rays_o.astype(np.float32), rays_d.astype(np.float32)
 
+    def _latent_frame_groups(self, num_frames):
+        latent_t = (num_frames - 1) // self.vae_temporal_downsample + 1
+        groups = [[0] * self.vae_temporal_downsample]
+        for i in range(1, latent_t):
+            start = 1 + (i - 1) * self.vae_temporal_downsample
+            group = [min(start + j, num_frames - 1) for j in range(self.vae_temporal_downsample)]
+            groups.append(group)
+        return groups
+
+    def _generate_raymap_latents_for_camera(self, cam_info, frame_ids, image_intrinsic, image_height, image_width):
+        latent_h = image_height // self.vae_spatial_downsample
+        latent_w = image_width // self.vae_spatial_downsample
+        latent_intrinsic = image_intrinsic.copy()
+        latent_intrinsic[0, 0] *= latent_w / image_width
+        latent_intrinsic[0, 2] *= latent_w / image_width
+        latent_intrinsic[1, 1] *= latent_h / image_height
+        latent_intrinsic[1, 2] *= latent_h / image_height
+
+        ray_o_list = []
+        ray_d_list = []
+        for group in self._latent_frame_groups(len(frame_ids)):
+            ray_o_group = []
+            ray_d_group = []
+            for pos in group:
+                fid = int(frame_ids[pos])
+                ray_o, ray_d = self._generate_raymap(latent_intrinsic, cam_info["c2w"][fid], latent_h, latent_w)
+                ray_o_group.append(ray_o)
+                ray_d_group.append(ray_d)
+            ray_o_list.append(np.concatenate(ray_o_group, axis=-1))
+            ray_d_list.append(np.concatenate(ray_d_group, axis=-1))
+        return ray_o_list, ray_d_list
+
     def _to_uint8_img(self, value, vmin, vmax):
         value = (value - vmin) / (vmax - vmin + 1e-8)
         value = np.clip(value, 0.0, 1.0)
@@ -602,6 +642,9 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
         frame_ids = self._make_frame_ids(start_idx)
         active_camera_names = self._select_camera_names(idx, sample_idx)
         frame_map = self._load_frames_by_ids(info, frame_ids.tolist(), active_camera_names)
+        global_frame_map = None
+        if self.output_global_reference:
+            global_frame_map = self._load_frames_by_ids(info, [int(frame_ids[0])], self.camera_names)
 
         cam_frames = {cam: [] for cam in active_camera_names}
         cam_traj_maps = {cam: [] for cam in active_camera_names}
@@ -649,11 +692,18 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
                 cam_frames[cam].append(pil_img)
                 cam_traj_maps[cam].append(Image.fromarray(traj_maps[i]))
 
-                if self.output_raymap:
+                if self.output_raymap and self.raymap_mode == "image":
                     c2w = cam_info["c2w"][fid]
                     ray_o, ray_d = self._generate_raymap(scaled_intrinsic, c2w, traj_h, traj_w)
                     cam_ray_o[cam].append(Image.fromarray(self._to_uint8_img(ray_o, self.ray_o_vmin, self.ray_o_vmax)))
                     cam_ray_d[cam].append(Image.fromarray(self._to_uint8_img(ray_d, self.ray_d_vmin, self.ray_d_vmax)))
+
+            if self.output_raymap and self.raymap_mode == "latent":
+                ray_o_latents, ray_d_latents = self._generate_raymap_latents_for_camera(
+                    cam_info, frame_ids, scaled_intrinsic, traj_h, traj_w
+                )
+                cam_ray_o[cam].extend(ray_o_latents)
+                cam_ray_d[cam].extend(ray_d_latents)
 
         video_list = []
         control_list = []
@@ -664,11 +714,34 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
             concat_control = np.concatenate([np.array(cam_traj_maps[cam][i]) for cam in active_camera_names], axis=0)
             video_list.append(Image.fromarray(concat_img))
             control_list.append(Image.fromarray(concat_control))
-            if self.output_raymap:
+            if self.output_raymap and self.raymap_mode == "image":
                 concat_ray_o = np.concatenate([np.array(cam_ray_o[cam][i]) for cam in active_camera_names], axis=0)
                 concat_ray_d = np.concatenate([np.array(cam_ray_d[cam][i]) for cam in active_camera_names], axis=0)
                 ray_o_list.append(Image.fromarray(concat_ray_o))
                 ray_d_list.append(Image.fromarray(concat_ray_d))
+
+        if self.output_raymap and self.raymap_mode == "latent":
+            ray_o_latents = []
+            ray_d_latents = []
+            for i in range(len(cam_ray_o[active_camera_names[0]])):
+                concat_ray_o = np.concatenate([cam_ray_o[cam][i] for cam in active_camera_names], axis=0)
+                concat_ray_d = np.concatenate([cam_ray_d[cam][i] for cam in active_camera_names], axis=0)
+                ray_o_latents.append(concat_ray_o)
+                ray_d_latents.append(concat_ray_d)
+            ray_o_list = torch.from_numpy(np.stack(ray_o_latents, axis=0)).permute(3, 0, 1, 2).float()
+            ray_d_list = torch.from_numpy(np.stack(ray_d_latents, axis=0)).permute(3, 0, 1, 2).float()
+
+        global_reference_images = None
+        if self.output_global_reference:
+            global_reference_images = []
+            for cam in self.camera_names:
+                img = global_frame_map[int(frame_ids[0])][cam]
+                if img.max() <= 1.0:
+                    img = (img * 255).clip(0, 255)
+                pil_img = Image.fromarray(img.astype(np.uint8))
+                if self.resize_to is not None:
+                    pil_img = pil_img.resize((self.resize_to[1], self.resize_to[0]), Image.BILINEAR)
+                global_reference_images.append(pil_img)
 
         if self.type == "vace":
             sample = {
@@ -680,6 +753,8 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
             if self.output_raymap:
                 sample["ray_map_o"] = ray_o_list
                 sample["ray_map_d"] = ray_d_list
+            if self.output_global_reference:
+                sample["vace_global_reference_images"] = global_reference_images
             return sample
         if self.type == "control":
             sample = {

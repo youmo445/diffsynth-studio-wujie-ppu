@@ -453,6 +453,7 @@ class WanVideoPipeline(BasePipeline):
         vace_video: Optional[list[Image.Image]] = None,
         vace_video_mask: Optional[Image.Image] = None,
         vace_reference_image: Optional[Image.Image] = None,
+        vace_global_reference_images: Optional[list[Image.Image]] = None,
         ray_map_o: Optional[list[Image.Image]] = None,
         ray_map_d: Optional[list[Image.Image]] = None,
         vace_scale: Optional[float] = 1.0,
@@ -485,7 +486,7 @@ class WanVideoPipeline(BasePipeline):
         # LongCat-Video
         longcat_video: Optional[list[Image.Image]] = None,
         # VAE tiling
-        tiled: Optional[bool] = True,
+        tiled: Optional[bool] = False,
         tile_size: Optional[tuple[int, int]] = (30, 52),
         tile_stride: Optional[tuple[int, int]] = (15, 26),
         # Sliding window
@@ -518,6 +519,7 @@ class WanVideoPipeline(BasePipeline):
             "control_video": control_video, "reference_image": reference_image,
             "camera_control_direction": camera_control_direction, "camera_control_speed": camera_control_speed, "camera_control_origin": camera_control_origin,
             "vace_video": vace_video, "vace_video_mask": vace_video_mask, "vace_reference_image": vace_reference_image,
+            "vace_global_reference_images": vace_global_reference_images,
             "ray_map_o": ray_map_o, "ray_map_d": ray_map_d, "vace_scale": vace_scale,
             "seed": seed, "rand_device": rand_device,
             "height": height, "width": width, "num_frames": num_frames,
@@ -900,19 +902,68 @@ class WanVideoUnit_SpeedControl(PipelineUnit):
 class WanVideoUnit_VACE(PipelineUnit):
     def __init__(self):
         super().__init__(
-            input_params=("vace_video", "vace_video_mask", "vace_reference_image", "vace_scale", "height", "width", "num_frames", "tiled", "tile_size", "tile_stride"),
+            input_params=("vace_video", "vace_video_mask", "vace_reference_image", "vace_global_reference_images", "vace_scale", "height", "width", "num_frames", "tiled", "tile_size", "tile_stride"),
             onload_model_names=("vae",)
         )
+        self._zero_latent_cache = {}
+
+    def _encode_global_reference_images(self, pipe, vace_global_reference_images, tiled, tile_size, tile_stride):
+        if vace_global_reference_images is None:
+            return None
+        if not isinstance(vace_global_reference_images, list):
+            vace_global_reference_images = [vace_global_reference_images]
+        global_images = pipe.preprocess_video(vace_global_reference_images)
+        _, _, f, _, _ = global_images.shape
+        global_frames = [global_images[0, :, j:j + 1] for j in range(f)]
+        global_latents = pipe.vae.encode(
+            global_frames,
+            device=pipe.device,
+            tiled=tiled,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+        ).to(dtype=pipe.torch_dtype, device=pipe.device)
+        return rearrange(global_latents, "f c t h w -> 1 (f t h w) c")
+
+    def _encode_condition_video(self, pipe, video, tiled, tile_size, tile_stride):
+        return pipe.vae.encode(
+            video,
+            device=pipe.device,
+            tiled=tiled,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+        ).to(dtype=pipe.torch_dtype, device=pipe.device)
+
+    def _zero_latents_like_video(self, pipe, video, tiled, tile_size, tile_stride):
+        if not hasattr(self, "_zero_latent_cache"):
+            self._zero_latent_cache = {}
+        key = (
+            tuple(video.shape),
+            str(video.dtype),
+            str(video.device),
+            bool(tiled),
+            tuple(tile_size) if tile_size is not None else None,
+            tuple(tile_stride) if tile_stride is not None else None,
+        )
+        cached = self._zero_latent_cache.get(key)
+        if cached is not None and cached.device == video.device and cached.dtype == pipe.torch_dtype:
+            return cached
+        zeros = torch.zeros_like(video)
+        latents = self._encode_condition_video(pipe, zeros, tiled, tile_size, tile_stride)
+        self._zero_latent_cache[key] = latents.detach()
+        return latents
 
     def process(
         self,
         pipe: WanVideoPipeline,
-        vace_video, vace_video_mask, vace_reference_image, vace_scale,
+        vace_video, vace_video_mask, vace_reference_image, vace_global_reference_images, vace_scale,
         height, width, num_frames,
         tiled, tile_size, tile_stride
     ):
         if vace_video is not None or vace_video_mask is not None or vace_reference_image is not None:
             pipe.load_models_to_device(["vae"])
+            vace_global_context = self._encode_global_reference_images(
+                pipe, vace_global_reference_images, tiled, tile_size, tile_stride
+            )
             if vace_video is None:
                 vace_video = torch.zeros((1, 3, num_frames, height, width), dtype=pipe.torch_dtype, device=pipe.device)
             else:
@@ -928,9 +979,12 @@ class WanVideoUnit_VACE(PipelineUnit):
             
             inactive = vace_video * (1 - vace_video_mask) + 0 * vace_video_mask # 0 shape: [1, 3, T=9, H, W]
             reactive = vace_video * vace_video_mask + 0 * (1 - vace_video_mask) # 1 shape: [1, 3, T=9, H, W]
-            inactive = pipe.vae.encode(inactive, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
+            if torch.all(vace_video_mask == 1):
+                inactive = self._zero_latents_like_video(pipe, vace_video, tiled, tile_size, tile_stride)
+            else:
+                inactive = self._encode_condition_video(pipe, inactive, tiled, tile_size, tile_stride)
             # [1, c=16, T'=3, H', W']
-            reactive = pipe.vae.encode(reactive, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
+            reactive = self._encode_condition_video(pipe, reactive, tiled, tile_size, tile_stride)
             vace_video_latents = torch.concat((inactive, reactive), dim=1)
             # [1, c=32, T'=3, H', W']
             print(f'vace_video_latents:{vace_video_latents.shape}') # [1, 32, T'=3, 60, 104]
@@ -952,7 +1006,7 @@ class WanVideoUnit_VACE(PipelineUnit):
                 for j in range(f):
                     new_vace_ref_images.append(vace_reference_image[0, :, j:j+1])
                 vace_reference_image = new_vace_ref_images
-                vace_reference_latents = pipe.vae.encode(vace_reference_image, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
+                vace_reference_latents = self._encode_condition_video(pipe, vace_reference_image, tiled, tile_size, tile_stride)
                 vace_reference_latents = torch.concat((vace_reference_latents, torch.zeros_like(vace_reference_latents)), dim=1)
                 # print(f'vace_reference_latents:{vace_reference_latents.shape}') # [1, 32, 1, 60, 104] [1, 32, T_ref=1, H', W']
                 # 分两部分是为了和前面对齐
@@ -964,9 +1018,9 @@ class WanVideoUnit_VACE(PipelineUnit):
                 # print(f'vace_mask_latents:{vace_mask_latents.shape}') # [1, 64, 22, 60, 104]
             vace_context = torch.concat((vace_video_latents, vace_mask_latents), dim=1)
             # print(f'vace_context:{vace_context.shape}') # [1, 96, 22, 60, 104]
-            return {"vace_context": vace_context, "vace_scale": vace_scale}
+            return {"vace_context": vace_context, "vace_global_context": vace_global_context, "vace_scale": vace_scale}
         else:
-            return {"vace_context": None, "vace_scale": vace_scale}
+            return {"vace_context": None, "vace_global_context": None, "vace_scale": vace_scale}
 
 
 class WanVideoUnit_VACE_raymap(WanVideoUnit_VACE):
@@ -975,6 +1029,7 @@ class WanVideoUnit_VACE_raymap(WanVideoUnit_VACE):
             self,
             input_params=(
                 "vace_video", "vace_video_mask", "vace_reference_image",
+                "vace_global_reference_images",
                 "ray_map_o", "ray_map_d",
                 "vace_scale", "height", "width", "num_frames",
                 "tiled", "tile_size", "tile_stride",
@@ -984,13 +1039,17 @@ class WanVideoUnit_VACE_raymap(WanVideoUnit_VACE):
 
     def _encode_video_latents(self, pipe, video, tiled, tile_size, tile_stride):
         video = pipe.preprocess_video(video)
-        return pipe.vae.encode(
-            video,
-            device=pipe.device,
-            tiled=tiled,
-            tile_size=tile_size,
-            tile_stride=tile_stride,
-        ).to(dtype=pipe.torch_dtype, device=pipe.device)
+        return self._encode_condition_video(pipe, video, tiled, tile_size, tile_stride)
+
+    def _prepare_raymap_latents(self, pipe, ray_map, tiled, tile_size, tile_stride):
+        if torch.is_tensor(ray_map):
+            ray_map = ray_map.to(dtype=pipe.torch_dtype, device=pipe.device)
+            if ray_map.ndim == 4:
+                ray_map = ray_map.unsqueeze(0)
+            if ray_map.ndim != 5:
+                raise ValueError(f"Expected latent raymap tensor with 4 or 5 dims, got {tuple(ray_map.shape)}")
+            return ray_map
+        return self._encode_video_latents(pipe, ray_map, tiled, tile_size, tile_stride)
 
     def _mask_latents(self, vace_video_mask, mask_channels=64):
         vace_mask_latents = rearrange(vace_video_mask[0, 0], "T (H P) (W Q) -> 1 (P Q) T H W", P=8, Q=8)
@@ -999,15 +1058,29 @@ class WanVideoUnit_VACE_raymap(WanVideoUnit_VACE):
             size=((vace_mask_latents.shape[2] + 3) // 4, vace_mask_latents.shape[3], vace_mask_latents.shape[4]),
             mode="nearest-exact",
         )
+        b, c, t, h, w = vace_mask_latents.shape
         if mask_channels == 32:
-            b, c, t, h, w = vace_mask_latents.shape
             vace_mask_latents = vace_mask_latents.reshape(b, 32, 2, t, h, w).amax(dim=2)
+        elif mask_channels < c:
+            vace_mask_latents = vace_mask_latents[:, :mask_channels]
+        elif mask_channels > c:
+            pad = torch.zeros(
+                b,
+                mask_channels - c,
+                t,
+                h,
+                w,
+                dtype=vace_mask_latents.dtype,
+                device=vace_mask_latents.device,
+            )
+            vace_mask_latents = torch.cat([vace_mask_latents, pad], dim=1)
         return vace_mask_latents
 
     def process(
         self,
         pipe: WanVideoPipeline,
         vace_video, vace_video_mask, vace_reference_image,
+        vace_global_reference_images,
         ray_map_o, ray_map_d,
         vace_scale,
         height, width, num_frames,
@@ -1016,16 +1089,19 @@ class WanVideoUnit_VACE_raymap(WanVideoUnit_VACE):
         if ray_map_o is None and ray_map_d is None:
             return super().process(
                 pipe,
-                vace_video, vace_video_mask, vace_reference_image, vace_scale,
+                vace_video, vace_video_mask, vace_reference_image, vace_global_reference_images, vace_scale,
                 height, width, num_frames,
                 tiled, tile_size, tile_stride,
             )
         if ray_map_o is None or ray_map_d is None:
             raise ValueError("ray_map_o and ray_map_d must be provided together.")
         if vace_video is None and vace_video_mask is None and vace_reference_image is None:
-            return {"vace_context": None, "vace_scale": vace_scale}
+            return {"vace_context": None, "vace_global_context": None, "vace_scale": vace_scale}
 
         pipe.load_models_to_device(["vae"])
+        vace_global_context = self._encode_global_reference_images(
+            pipe, vace_global_reference_images, tiled, tile_size, tile_stride
+        )
         if vace_video is None:
             vace_video = torch.zeros((1, 3, num_frames, height, width), dtype=pipe.torch_dtype, device=pipe.device)
         else:
@@ -1038,13 +1114,16 @@ class WanVideoUnit_VACE_raymap(WanVideoUnit_VACE):
 
         inactive = vace_video * (1 - vace_video_mask) + 0 * vace_video_mask
         reactive = vace_video * vace_video_mask + 0 * (1 - vace_video_mask)
-        inactive = pipe.vae.encode(inactive, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
-        reactive = pipe.vae.encode(reactive, device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride).to(dtype=pipe.torch_dtype, device=pipe.device)
-        ray_map_o_latents = self._encode_video_latents(pipe, ray_map_o, tiled, tile_size, tile_stride)
-        ray_map_d_latents = self._encode_video_latents(pipe, ray_map_d, tiled, tile_size, tile_stride)
+        if torch.all(vace_video_mask == 1):
+            inactive = self._zero_latents_like_video(pipe, vace_video, tiled, tile_size, tile_stride)
+        else:
+            inactive = self._encode_condition_video(pipe, inactive, tiled, tile_size, tile_stride)
+        reactive = self._encode_condition_video(pipe, reactive, tiled, tile_size, tile_stride)
+        ray_map_o_latents = self._prepare_raymap_latents(pipe, ray_map_o, tiled, tile_size, tile_stride)
+        ray_map_d_latents = self._prepare_raymap_latents(pipe, ray_map_d, tiled, tile_size, tile_stride)
 
         vace_video_latents = torch.concat((inactive, reactive, ray_map_o_latents, ray_map_d_latents), dim=1)
-        vace_mask_latents = self._mask_latents(vace_video_mask, mask_channels=32)
+        vace_mask_latents = self._mask_latents(vace_video_mask, mask_channels=96 - vace_video_latents.shape[1])
 
         if vace_reference_image is not None:
             if not isinstance(vace_reference_image, list):
@@ -1054,20 +1133,28 @@ class WanVideoUnit_VACE_raymap(WanVideoUnit_VACE):
             new_vace_ref_images = []
             for j in range(f):
                 new_vace_ref_images.append(vace_reference_image[0, :, j:j + 1])
-            vace_reference_latents = pipe.vae.encode(
-                new_vace_ref_images,
-                device=pipe.device,
-                tiled=tiled,
-                tile_size=tile_size,
-                tile_stride=tile_stride,
-            ).to(dtype=pipe.torch_dtype, device=pipe.device)
-            vace_reference_latents = torch.concat((vace_reference_latents, torch.zeros_like(vace_reference_latents).repeat(1, 3, 1, 1, 1)), dim=1)
+            vace_reference_latents = self._encode_condition_video(pipe, new_vace_ref_images, tiled, tile_size, tile_stride)
+            pad_channels = vace_video_latents.shape[1] - vace_reference_latents.shape[1]
+            if pad_channels < 0:
+                raise ValueError(
+                    f"Reference latent channels {vace_reference_latents.shape[1]} exceed VACE video latent channels {vace_video_latents.shape[1]}."
+                )
+            ref_pad = torch.zeros(
+                vace_reference_latents.shape[0],
+                pad_channels,
+                vace_reference_latents.shape[2],
+                vace_reference_latents.shape[3],
+                vace_reference_latents.shape[4],
+                dtype=vace_reference_latents.dtype,
+                device=vace_reference_latents.device,
+            )
+            vace_reference_latents = torch.concat((vace_reference_latents, ref_pad), dim=1)
             vace_reference_latents = [u.unsqueeze(0) for u in vace_reference_latents]
             vace_video_latents = torch.concat((*vace_reference_latents, vace_video_latents), dim=2)
             vace_mask_latents = torch.concat((torch.zeros_like(vace_mask_latents[:, :, :f]), vace_mask_latents), dim=2)
 
         vace_context = torch.concat((vace_video_latents, vace_mask_latents), dim=1)
-        return {"vace_context": vace_context, "vace_scale": vace_scale}
+        return {"vace_context": vace_context, "vace_global_context": vace_global_context, "vace_scale": vace_scale}
 
 class WanVideoUnit_VAP(PipelineUnit):
     def __init__(self):
@@ -1255,7 +1342,7 @@ class WanVideoUnit_S2V(PipelineUnit):
         return inputs_shared, inputs_posi, inputs_nega
 
     @staticmethod
-    def pre_calculate_audio_pose(pipe: WanVideoPipeline, input_audio=None, audio_sample_rate=16000, s2v_pose_video=None, num_frames=81, height=448, width=832, fps=16, tiled=True, tile_size=(30, 52), tile_stride=(15, 26)):
+    def pre_calculate_audio_pose(pipe: WanVideoPipeline, input_audio=None, audio_sample_rate=16000, s2v_pose_video=None, num_frames=81, height=448, width=832, fps=16, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
         assert pipe.audio_encoder is not None and pipe.audio_processor is not None, "Please load audio encoder and audio processor first."
         shapes = WanVideoUnit_ShapeChecker().process(pipe, height, width, num_frames)
         height, width, num_frames = shapes["height"], shapes["width"], shapes["num_frames"]
@@ -1501,6 +1588,7 @@ def model_fn_wan_video(
     y: Optional[torch.Tensor] = None,
     reference_latents = None,
     vace_context = None,
+    vace_global_context = None,
     vace_scale = 1.0,
     audio_embeds: Optional[torch.Tensor] = None,
     motion_latents: Optional[torch.Tensor] = None,
@@ -1536,6 +1624,7 @@ def model_fn_wan_video(
             y=y,
             reference_latents=reference_latents,
             vace_context=vace_context,
+            vace_global_context=vace_global_context,
             vace_scale=vace_scale,
             tea_cache=tea_cache,
             use_unified_sequence_parallel=use_unified_sequence_parallel,
@@ -1676,6 +1765,7 @@ def model_fn_wan_video(
     if vace_context is not None:
         vace_hints = vace(
             x, vace_context, context, t_mod, freqs,
+            vace_global_context=vace_global_context,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload
         )

@@ -86,6 +86,20 @@ def save_video_stream(frame_paths, out_path, fps):
         writer.close()
 
 
+def load_global_reference_images(mv, ep, args_dict):
+    downsample_step = args_dict["original_hz"] // args_dict["target_hz"]
+    ep_info = mv.build_episode_info(ep, downsample_step, args_dict["camera_names"])
+    return [
+        mv.load_first_multiview_frame(
+            ep_info,
+            [cam],
+            args_dict["view_height"],
+            args_dict["view_width"],
+        )
+        for cam in args_dict["camera_names"]
+    ]
+
+
 def run_single_view_episode(mv, pipe, ep, cam, args_dict, view_out_dir):
     os.makedirs(view_out_dir, exist_ok=True)
     images_dir = os.path.join(view_out_dir, "images")
@@ -102,6 +116,9 @@ def run_single_view_episode(mv, pipe, ep, cam, args_dict, view_out_dir):
         raise RuntimeError(f"Episode {ep['episode_key']} has no frames.")
 
     first_frame = mv.load_first_multiview_frame(ep_info, [cam], view_height, view_width)
+    global_reference_images = None
+    if args_dict["use_vace_global_reference"]:
+        global_reference_images = load_global_reference_images(mv, ep, args_dict)
     control_video, ray_map_o, ray_map_d = mv.build_episode_controls(
         ep_info,
         [cam],
@@ -131,8 +148,10 @@ def run_single_view_episode(mv, pipe, ep, cam, args_dict, view_out_dir):
             "num_inference_steps": args_dict["num_inference_steps"],
             "cfg_scale": args_dict["cfg_scale"],
             "seed": args_dict["seed"] + chunk_idx,
-            "tiled": True,
+            "tiled": args_dict["tiled"],
         }
+        if global_reference_images is not None:
+            pipe_kwargs["vace_global_reference_images"] = global_reference_images
         if args_dict["output_raymap"]:
             pipe_kwargs["ray_map_o"] = mv.get_chunk_with_pad(ray_map_o, context_idx, fixed_num_frames)
             pipe_kwargs["ray_map_d"] = mv.get_chunk_with_pad(ray_map_d, context_idx, fixed_num_frames)
@@ -221,11 +240,11 @@ def stitch_episode(episode_key, camera_names, view_cache_dir, final_out_dir, fps
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--val_path", type=str, default="/mnt/workspace/zsq/Agi2024subset_split/val")
-    parser.add_argument("--output_dir", type=str, default="/mnt/workspace/zsq/Agi2024subset_split/val_gen_separate_views")
+    parser.add_argument("--output_dir", type=str, default="/mnt/workspace/zsq/Agi2024subset_split/val_gen_separate_views_global")
     parser.add_argument("--prompt", type=str, default="机械臂按照要求移动夹爪执行任务")
     parser.add_argument("--camera_names", nargs="+", default=["head", "hand_left", "hand_right"])
-    parser.add_argument("--model_path_mode", type=str, default="separate", choices=["separate", "shared"])
-    parser.add_argument("--shared_model_path", type=str, default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-1.3B-random-view-raymap-perspectivate/epoch-59.safetensors")
+    parser.add_argument("--model_path_mode", type=str, default="shared", choices=["separate", "shared"])
+    parser.add_argument("--shared_model_path", type=str, default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-1.3B-random-view-global-raymap-perspectivate/epoch-49.safetensors")
     parser.add_argument("--head_model_path", type=str, default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-1.3B-head-raymap-perspectivate/epoch-59.safetensors")
     parser.add_argument("--hand_left_model_path", type=str, default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-1.3B-hand_left-raymap-perspectivate/epoch-59.safetensors")
     parser.add_argument("--hand_right_model_path", type=str, default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-1.3B-hand_right-raymap-perspectivate/epoch-59.safetensors")
@@ -239,6 +258,7 @@ def main():
     parser.add_argument("--cfg_scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fps", type=int, default=15)
+    parser.add_argument("--tiled", action="store_true")
     parser.add_argument("--view_height", type=int, default=320)
     parser.add_argument("--view_width", type=int, default=512)
     parser.add_argument("--orig_height", type=int, default=None)
@@ -251,6 +271,7 @@ def main():
     parser.add_argument("--traj_near_depth", type=float, default=0.19)
     parser.add_argument("--traj_far_depth", type=float, default=0.69)
     parser.add_argument("--output_raymap", action="store_true")
+    parser.add_argument("--use_vace_global_reference", action="store_true")
     parser.add_argument("--ray_o_vmin", type=float, default=-1.5)
     parser.add_argument("--ray_o_vmax", type=float, default=1.5)
     parser.add_argument("--ray_d_vmin", type=float, default=-1.0)

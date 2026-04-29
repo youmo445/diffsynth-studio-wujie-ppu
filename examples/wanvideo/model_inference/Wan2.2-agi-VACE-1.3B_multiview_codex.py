@@ -321,6 +321,8 @@ def load_pipe(base_model_paths, vace_model_path, device):
     )
     if vace_model_path:
         state_dict = load_state_dict(vace_model_path)
+        if any(name.startswith("vace_global_") for name in state_dict):
+            pipe.vace.enable_global_cross_attn(global_context_dim=16)
         pipe.vace.load_state_dict(state_dict)
     return pipe
 
@@ -383,7 +385,7 @@ def run_episode(pipe, ep_info, args):
             "num_inference_steps": args.num_inference_steps,
             "cfg_scale": args.cfg_scale,
             "seed": args.seed + chunk_idx,
-            "tiled": True,
+            "tiled": args.tiled,
         }
         if args.output_raymap:
             pipe_kwargs["ray_map_o"] = get_chunk_with_pad(ray_map_o, context_idx, fixed_num_frames)
@@ -432,12 +434,13 @@ def main():
     parser.add_argument("--cfg_scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fps", type=int, default=15)
+    parser.add_argument("--tiled", action="store_true")
     parser.add_argument("--view_height", type=int, default=320)
     parser.add_argument("--view_width", type=int, default=512)
     parser.add_argument("--orig_height", type=int, default=None)
     parser.add_argument("--orig_width", type=int, default=None)
     parser.add_argument("--traj_radius", type=int, default=50)
-    parser.add_argument("--traj_radius_mode", type=str, default="perspective", choices=["constant", "perspective", "depth_norm"])
+    parser.add_argument("--traj_radius_mode", type=str, default="constant", choices=["constant", "perspective", "depth_norm"])
     parser.add_argument("--traj_min_radius", type=int, default=20)
     parser.add_argument("--traj_max_radius", type=int, default=60)
     parser.add_argument("--traj_ref_depth", type=float, default=0.30)
@@ -466,7 +469,7 @@ def main():
     parser.add_argument(
         "--vace_model_path",
         type=str,
-        default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-1.3B-multiview-raymap-perspectivate/epoch-49.safetensors",
+        default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-1.3B-multiview-raymap-constant/epoch-49.safetensors",
     )
     args = parser.parse_args()
 

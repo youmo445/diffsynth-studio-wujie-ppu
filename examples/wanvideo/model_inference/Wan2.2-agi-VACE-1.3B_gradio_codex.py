@@ -410,7 +410,7 @@ def run_generation(episode_key, chunk_id, traj_radius_mode, seed, num_inference_
         "num_inference_steps": int(num_inference_steps),
         "cfg_scale": float(cfg_scale),
         "seed": int(seed),
-        "tiled": True,
+        "tiled": False,
     }
     if args.output_raymap:
         pipe_kwargs["ray_map_o"] = ray_o_frames

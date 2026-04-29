@@ -501,7 +501,7 @@ def main():
             "num_inference_steps": args.num_inference_steps,
             "cfg_scale": args.cfg_scale,
             "seed": args.seed + chunk_idx,
-            "tiled": True,
+            "tiled": False,
         }
         if args.output_raymap:
             pipe_kwargs["ray_map_o"] = get_chunk_with_pad(ray_map_o, local_context_idx, args.num_frames)
