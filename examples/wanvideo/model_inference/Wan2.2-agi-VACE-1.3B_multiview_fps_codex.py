@@ -333,6 +333,8 @@ def load_pipe(base_model_paths, vace_model_path, device):
         state_dict = load_state_dict(vace_model_path)
         if any(name.startswith("vace_global_") for name in state_dict):
             pipe.vace.enable_global_cross_attn(global_context_dim=16)
+        if any(name.startswith("vace_ray_o_adapter.") or name.startswith("vace_ray_d_adapter.") for name in state_dict):
+            pipe.vace.enable_latent_raymap_adapter()
         pipe.vace.load_state_dict(state_dict)
     return pipe
 
