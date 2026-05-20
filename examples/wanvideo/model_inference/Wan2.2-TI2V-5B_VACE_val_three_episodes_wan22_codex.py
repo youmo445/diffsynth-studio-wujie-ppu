@@ -426,7 +426,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/val_wan22_vace_epoch29_codex_50steps",
+        default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/val_wan22_vace_applymask9",
     )
     parser.add_argument("--prompt", type=str, default="机械臂按照要求移动夹爪执行任务")
     parser.add_argument("--camera_names", nargs="+", default=["head", "hand_left", "hand_right"])
@@ -434,7 +434,7 @@ def main():
     parser.add_argument("--target_hz", type=int, default=5)
     parser.add_argument("--num_frames", type=int, default=9)
     parser.add_argument("--predict_frames", type=int, default=8)
-    parser.add_argument("--num_inference_steps", type=int, default=50)
+    parser.add_argument("--num_inference_steps", type=int, default=5)
     parser.add_argument("--cfg_scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fps", type=int, default=15)
@@ -466,7 +466,12 @@ def main():
         "--model_paths",
         nargs="+",
         default=[
-            "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-TI2V-5B-VACE-wan22-codex-ray-action-perspective-continue20/epoch-29-merge.safetensors",
+            [
+                "/mnt/data/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00001-of-00003.safetensors",
+                "/mnt/data/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00002-of-00003.safetensors",
+                "/mnt/data/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00003-of-00003.safetensors",
+            ],
+            "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-TI2V-5B-VACE-wan22-codex-ray-action-perspective-9-applymask/epoch-49.safetensors",
             "/mnt/workspace/zsq/Wan_model/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth",
             "/mnt/workspace/zsq/Wan_model/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
         ],

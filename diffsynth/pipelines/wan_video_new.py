@@ -563,7 +563,11 @@ class WanVideoPipeline(BasePipeline):
             # Scheduler
             inputs_shared["latents"] = self.scheduler.step(noise_pred, self.scheduler.timesteps[progress_id], inputs_shared["latents"])
             if "first_frame_latents" in inputs_shared:
-                inputs_shared["latents"][:, :, 0:1] = inputs_shared["first_frame_latents"]
+                num_context_latents = min(
+                    inputs_shared["first_frame_latents"].shape[2],
+                    inputs_shared["latents"].shape[2],
+                )
+                inputs_shared["latents"][:, :, :num_context_latents] = inputs_shared["first_frame_latents"][:, :, :num_context_latents]
             # input('x')
         # VACE (TODO: remove it)
         if vace_reference_image is not None or (animate_pose_video is not None and animate_face_video is not None):
@@ -590,7 +594,9 @@ class WanVideoUnit_ShapeChecker(PipelineUnit):
         super().__init__(input_params=("height", "width", "num_frames"))
 
     def process(self, pipe: WanVideoPipeline, height, width, num_frames):
+
         height, width, num_frames = pipe.check_resize_height_width(height, width, num_frames)
+        print(f'ShapeChecker: height={height}, width={width}, num_frames={num_frames}')
         return {"height": height, "width": width, "num_frames": num_frames}
 
 
@@ -611,6 +617,7 @@ class WanVideoUnit_NoiseInitializer(PipelineUnit):
             # 何意味
             noise = torch.concat((noise[:, :, -f:], noise[:, :, :-f]), dim=2)
         # print(f'noise:{noise.shape}') # [1, 16, 4, 40, 64]
+        print(f'NoiseInitializer: noise shape={noise.shape}')
         return {"noise": noise}
     
 
@@ -638,9 +645,12 @@ class WanVideoUnit_InputVideoEmbedder(PipelineUnit):
             input_latents = torch.concat([vace_reference_latents, input_latents], dim=2)
             # print(f'input_latents:{input_latents.shape}')
         if pipe.scheduler.training:
+            print(f'InputVideoEmbedder: input_latents shape={input_latents.shape}, latents shape={noise.shape}')
             return {"latents": noise, "input_latents": input_latents}
         else:
             latents = pipe.scheduler.add_noise(input_latents, noise, timestep=pipe.scheduler.timesteps[0])
+            # 这个应该是推理时用于V2V的，用不到
+            print(f'InputVideoEmbedder: latents shape={latents.shape}')
             return {"latents": latents}
 
 
@@ -734,6 +744,7 @@ class WanVideoUnit_ImageEmbedderVAE(PipelineUnit):
 
     def process(self, pipe: WanVideoPipeline, input_image, end_image, num_frames, modified_mask, height, width, tiled, tile_size, tile_stride):
         if input_image is None or not pipe.dit.require_vae_embedding:
+            # print("No input image or VAE embedding is not required, skip image embedding.")
             return {}
         pipe.load_models_to_device(self.onload_model_names)
         image = pipe.preprocess_image(input_image.resize((width, height))).to(pipe.device)
@@ -781,6 +792,7 @@ class WanVideoUnit_ImageEmbedderFused(PipelineUnit):
         image = pipe.preprocess_image(input_image.resize((width, height))).transpose(0, 1)
         z = pipe.vae.encode([image], device=pipe.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         latents[:, :, 0: 1] = z
+        print(f'ImageEmbedderFused: latents shape={latents.shape}, first_frame_latents shape={z.shape}')
         return {"latents": latents, "fuse_vae_embedding_in_latents": True, "first_frame_latents": z}
 
 
@@ -1610,6 +1622,7 @@ def model_fn_wan_video(
     use_gradient_checkpointing_offload: bool = False,
     control_camera_latents_input = None,
     fuse_vae_embedding_in_latents: bool = False,
+    clean_latent_slots: int = 1,
     **kwargs,
 ):
     if sliding_window_size is not None and sliding_window_stride is not None:
@@ -1629,6 +1642,8 @@ def model_fn_wan_video(
             tea_cache=tea_cache,
             use_unified_sequence_parallel=use_unified_sequence_parallel,
             motion_bucket_id=motion_bucket_id,
+            fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
+            clean_latent_slots=clean_latent_slots,
         )
         return TemporalTiler_BCTHW().run(
             model_fn_wan_video,
@@ -1674,9 +1689,12 @@ def model_fn_wan_video(
 
     # Timestep
     if dit.seperated_timestep and fuse_vae_embedding_in_latents:
+        clean_latent_slots = min(max(int(clean_latent_slots), 1), latents.shape[2])
+        print(f'使用了{clean_latent_slots}个干净的latent槽位用于时间编码融合，剩余{latents.shape[2] - clean_latent_slots}个槽位用于输入原始latents。')
+        tokens_per_latent = latents.shape[3] * latents.shape[4] // 4
         timestep = torch.concat([
-            torch.zeros((1, latents.shape[3] * latents.shape[4] // 4), dtype=latents.dtype, device=latents.device),
-            torch.ones((latents.shape[2] - 1, latents.shape[3] * latents.shape[4] // 4), dtype=latents.dtype, device=latents.device) * timestep
+            torch.zeros((clean_latent_slots, tokens_per_latent), dtype=latents.dtype, device=latents.device),
+            torch.ones((latents.shape[2] - clean_latent_slots, tokens_per_latent), dtype=latents.dtype, device=latents.device) * timestep,
         ]).flatten()
         t = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep).unsqueeze(0))
         if use_unified_sequence_parallel and dist.is_initialized() and dist.get_world_size() > 1:
@@ -1694,7 +1712,8 @@ def model_fn_wan_video(
     context = dit.text_embedding(context)
 
     x = latents
-    print(f'---x:{x.shape}')
+    # print(f'---x:{x.shape}')
+    # [1, 48, 5, 30, 14]
     # Merged cfg
     if x.shape[0] != context.shape[0]:
         x = torch.concat([x] * context.shape[0], dim=0)
@@ -1712,7 +1731,8 @@ def model_fn_wan_video(
         
     # Camera control
     x = dit.patchify(x, control_camera_latents_input)
-    print(f'x:{x.shape}')
+    # print(f'x:{x.shape}')
+    # [1, 3072, 5, 15, 7]
     # Animate
     if pose_latents is not None and face_pixel_values is not None:
         x, motion_vec = animate_adapter.after_patch_embedding(x, pose_latents, face_pixel_values)
@@ -1730,7 +1750,8 @@ def model_fn_wan_video(
         x = torch.concat([reference_latents, x], dim=1)
         print(f'x:{x.shape}')
         f += 1
-    print(f'x:{x.shape}')
+    # print(f'x:{x.shape}')
+    # [1, 525, 3072]
     freqs = torch.cat([
         dit.freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1), # frame方向的频率编码
         dit.freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1), # height方向的频率编码

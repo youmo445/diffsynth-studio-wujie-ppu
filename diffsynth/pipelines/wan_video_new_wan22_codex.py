@@ -1,3 +1,5 @@
+import types
+
 import torch
 
 from .wan_video_new import *  # noqa: F401,F403
@@ -43,6 +45,7 @@ class WanVideoUnit_Wan22CodexVACE144(PipelineUnit):
                 latents = latents.unsqueeze(0)
             if latents.ndim != 5:
                 raise ValueError(f"{name} tensor must have 4 or 5 dims, got {tuple(latents.shape)}.")
+            raise NotImplementedError("暂时不支持直接输入ray/action latent tensor，必须输入原始视频/图像/动作图并通过VAE编码成latent。")
             return latents
         video = pipe.preprocess_video(value)
         return pipe.vae.encode(
@@ -76,11 +79,11 @@ class WanVideoUnit_Wan22CodexVACE144(PipelineUnit):
             raise ValueError("Wan2.2 Codex VACE requires ray_map_o, ray_map_d, and action_map or vace_video.")
 
         pipe.load_models_to_device(["vae"])
-        ray_o_latents = self._as_latents(pipe, ray_map_o, "ray_map_o", tiled, tile_size, tile_stride)
+        ray_o_latents = self._as_latents(pipe, ray_map_o, "ray_map_o", tiled, tile_size, tile_stride) # [1, 48, T', H', W']
         ray_d_latents = self._as_latents(pipe, ray_map_d, "ray_map_d", tiled, tile_size, tile_stride)
         action_latents = self._as_latents(pipe, action_source, "action_map/vace_video", tiled, tile_size, tile_stride)
-
         shapes = {tuple(u.shape[2:]) for u in (ray_o_latents, ray_d_latents, action_latents)}
+        # {}会去重，如果去重后不止一个shape，说明ray/action latent的时间/空间维度不匹配，无法拼接成VACE输入了
         if len(shapes) != 1:
             raise ValueError(
                 "ray/action latent temporal-spatial shapes must match, got "
@@ -107,10 +110,39 @@ class WanVideoPipeline(_WanVideoPipelineBase):
         super().__init__(*args, **kwargs)
         self._install_wan22_codex_units()
 
+    def training_loss(self, **inputs):
+        print(f'TI2V2_VACE_1context的training_loss被调用')
+        max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * self.scheduler.num_train_timesteps)
+        min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * self.scheduler.num_train_timesteps)
+        timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
+        timestep = self.scheduler.timesteps[timestep_id].to(dtype=self.torch_dtype, device=self.device)
+
+        input_latents = inputs["input_latents"]
+        noise = inputs["noise"]
+        latents = self.scheduler.add_noise(input_latents, noise, timestep)
+        if inputs.get("fuse_vae_embedding_in_latents", False):
+            latents[:, :, 0:1] = input_latents[:, :, 0:1]
+        inputs["latents"] = latents
+
+        training_target = self.scheduler.training_target(input_latents, noise, timestep)
+        noise_pred = self.model_fn(**inputs, timestep=timestep)
+
+        loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float(), reduction="none")
+        if inputs.get("fuse_vae_embedding_in_latents", False):
+            print(f'Applying loss mask for fused VAE embedding')
+            loss_mask = torch.ones_like(loss)
+            loss_mask[:, :, 0:1] = 0
+            loss = (loss * loss_mask).sum() / loss_mask.sum().clamp_min(1)
+        else:
+            loss = loss.mean()
+        loss = loss * self.scheduler.training_weight(timestep)
+        return loss
+
     def _install_wan22_codex_units(self):
         self.units = [
             WanVideoUnit_Wan22CodexVACE144() if isinstance(unit, _WanVideoUnit_VACE_raymap) else unit
             for unit in self.units
+            # 把官方的VACE单元替换成Wan2.2 Codex版本，后者构建144-channel的VACE输入
         ]
 
     @staticmethod
@@ -120,4 +152,5 @@ class WanVideoPipeline(_WanVideoPipelineBase):
             WanVideoUnit_Wan22CodexVACE144() if isinstance(unit, _WanVideoUnit_VACE_raymap) else unit
             for unit in pipe.units
         ]
+        pipe.training_loss = types.MethodType(WanVideoPipeline.training_loss, pipe)
         return pipe

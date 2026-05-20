@@ -70,6 +70,8 @@ class WanTrainingModule(DiffusionTrainingModule):
             "use_gradient_checkpointing": self.use_gradient_checkpointing,
             "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
             "cfg_merge": False,
+            "fuse_vae_embedding_in_latents": True,
+            "clean_latent_slots": 2,
             "max_timestep_boundary": self.max_timestep_boundary,
             "min_timestep_boundary": self.min_timestep_boundary,
             "ti2v2_low_noise_step_offset": self.ti2v2_low_noise_step_offset,

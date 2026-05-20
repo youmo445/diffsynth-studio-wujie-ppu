@@ -1448,6 +1448,7 @@ def launch_training_task(
         for data in tqdm(dataloader):
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
+                # 这里如果严谨一点的话应该先对loss进行平均再打印，参见val部分的写法
                 if dataset.load_from_cache:
                     loss = model({}, inputs=data)
                 else:

@@ -1,15 +1,18 @@
 """
-Multi-view Wan2.2 Codex VACE validation on three AgiBot val episodes.
+Stage-1-only Wan2.2 TI2V2 validation rollout on three AgiBot val episodes.
 
-This script keeps trajectory projection and image raymap generation consistent
-with the current multiview training logic. It expects a merged DiT+VACE
-checkpoint plus the Wan2.2 T5 and VAE checkpoints.
+This is a control script for checking whether chunk-boundary discontinuity
+already exists in the stage-1 TI2V2 DiT before adding VACE/raymap controls.
+It uses the same 5-frame context + 8-frame autoregressive rollout pattern as
+the stage-2 VACE script, but it does not pass vace_video, ray_map_o, or
+ray_map_d to the pipeline.
 
 Example:
     cd /mnt/workspace/zsq/DiffSynth-Studio
-    python examples/wanvideo/model_inference/Wan2.2-TI2V-5B_VACE_val_three_episodes_wan22_codex.py \
+    python examples/wanvideo/model_inference/Wan2.2-TI2V-5B_TI2V2_val_three_episodes_stage1_codex.py \
         --val_path /mnt/workspace/zsq/Agi2024subset_split/val \
-        --output_dir /mnt/workspace/zsq/DiffSynth-Studio/outputs/val_wan22_vace_epoch29_codex
+        --output_dir /mnt/workspace/zsq/Agi2024subset_split/val_wan22_ti2v2_stage1_epoch49 \
+        --gpus 0,1,2 \
 """
 
 import argparse
@@ -325,7 +328,7 @@ def get_chunk_by_ids_with_pad(frames, frame_ids):
 def load_pipe(model_paths, device):
     import torch
 
-    from diffsynth.pipelines.wan_video_new_wan22_codex import ModelConfig, WanVideoPipeline
+    from diffsynth.pipelines.wan_video_new_wan22_ti2v2_codex import ModelConfig, WanVideoPipeline
     from diffsynth.utils import PipelineUnit
 
     class WanVideoUnit_TI2V2ContextEmbedder(PipelineUnit):
@@ -356,8 +359,8 @@ def load_pipe(model_paths, device):
             latents[:, :, 0:2] = context_latents[:, :, 0:2]
             return {
                 "latents": latents,
-                "fuse_vae_embedding_in_latents": True, # 为了适配之前错误设置了timestep的训练，这里保持不变，后续训练时再调整
-                "clean_latent_slots": 1,
+                "fuse_vae_embedding_in_latents": True,
+                "clean_latent_slots": 2,
                 "first_frame_latents": context_latents[:, :, 0:2],
             }
 
@@ -387,8 +390,6 @@ def run_episode(pipe, ep_info, args):
     total_height = view_height * len(camera_names)
 
     first_frame = load_first_multiview_frame(ep_info, camera_names, view_height, view_width)
-    control_video, ray_map_o, ray_map_d = build_episode_controls(ep_info, camera_names, view_height, view_width, args)
-
     total_frames = ep_info["T_ds"]
     if total_frames <= 0:
         raise RuntimeError(f"Episode {ep_info['episode_key']} is empty.")
@@ -396,12 +397,6 @@ def run_episode(pipe, ep_info, args):
     ep_out_dir = os.path.join(args.output_dir, ep_info["episode_key"])
     images_dir = os.path.join(ep_out_dir, "images")
     os.makedirs(ep_out_dir, exist_ok=True)
-
-    if args.save_control_video:
-        save_video(control_video, os.path.join(ep_out_dir, "control_video.mp4"), fps=args.fps, quality=5)
-    if args.output_raymap and args.save_raymap_video:
-        save_video(ray_map_o, os.path.join(ep_out_dir, "ray_map_o.mp4"), fps=args.fps, quality=5)
-        save_video(ray_map_d, os.path.join(ep_out_dir, "ray_map_d.mp4"), fps=args.fps, quality=5)
 
     generated_frames = [first_frame]
     predict_frames = args.predict_frames
@@ -428,11 +423,9 @@ def run_episode(pipe, ep_info, args):
             f"valid_prediction_count={valid_prediction_count}"
         )
 
-        control_chunk = get_chunk_by_ids_with_pad(control_video, condition_ids)
         pipe_kwargs = {
             "prompt": args.prompt,
             "input_video": context_video,
-            "vace_video": control_chunk,
             "height": total_height,
             "width": view_width,
             "num_frames": fixed_num_frames,
@@ -441,15 +434,13 @@ def run_episode(pipe, ep_info, args):
             "seed": args.seed + chunk_idx,
             "tiled": args.tiled,
         }
-        pipe_kwargs["ray_map_o"] = get_chunk_by_ids_with_pad(ray_map_o, condition_ids)
-        pipe_kwargs["ray_map_d"] = get_chunk_by_ids_with_pad(ray_map_d, condition_ids)
 
         if args.dry_run:
             print(
                 f"[DRY RUN] episode={ep_info['episode_key']} chunk={chunk_idx + 1}/{num_chunks} "
                 f"horizon_start_idx={horizon_start_idx} valid_prediction_count={valid_prediction_count} "
                 f"condition_ids={condition_ids} "
-                f"frame_size=({total_height}, {view_width}) output_raymap={args.output_raymap}"
+                f"frame_size=({total_height}, {view_width}) stage1_only=True"
             )
             break
 
@@ -483,21 +474,13 @@ def run_episode(pipe, ep_info, args):
     )
 
 
-def normalize_model_paths(model_paths):
-    if len(model_paths) == 1 and isinstance(model_paths[0], str):
-        text = model_paths[0].strip()
-        if text.startswith("["):
-            return json.loads(text)
-    return model_paths
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--val_path", type=str, default="/mnt/data/zsq/Agi2024subset_split/val")
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/mnt/workspace/zsq/Agi2024subset_split/val_wan22_vace_ti2v2_stage2_qian1t=0_0520",
+        default="/mnt/workspace/zsq/Agi2024subset_split/val_wan22_ti2v2_stage1_epoch49_codex",
     )
     parser.add_argument("--prompt", type=str, default="机械臂按照要求移动夹爪执行任务")
     parser.add_argument("--camera_names", nargs="+", default=["head", "hand_left", "hand_right"])
@@ -543,18 +526,12 @@ def main():
         "--model_paths",
         nargs="+",
         default=[
-            [
-                "/mnt/data/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00001-of-00003.safetensors",
-                "/mnt/data/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00002-of-00003.safetensors",
-                "/mnt/data/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00003-of-00003.safetensors",
-            ],
-            "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-TI2V-5B-VACE-TI2V2-context5-horizon8-codex-strictlybaseonWan22TI2V5B-offset=1/epoch-19.safetensors",
+            "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-TI2V-5B-TI2V2-context5-horizon8-codex-nonoise/epoch-49.safetensors",
             "/mnt/data/zsq/Wan_model/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth",
             "/mnt/data/zsq/Wan_model/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
         ],
     )
     args = parser.parse_args()
-    args.model_paths = normalize_model_paths(args.model_paths)
 
     if args.num_frames != args.context_frames + args.horizon_frames:
         raise ValueError("--num_frames must equal --context_frames + --horizon_frames.")
@@ -562,9 +539,6 @@ def main():
         raise ValueError("--predict_frames must equal --horizon_frames for this TI2V2 autoregressive val.")
     if args.original_hz % args.target_hz != 0:
         raise ValueError("--original_hz must be divisible by --target_hz.")
-    if not args.output_raymap:
-        raise ValueError("Wan2.2 Codex VACE validation requires image raymaps; do not pass --no_output_raymap.")
-
     downsample_step = args.original_hz // args.target_hz
     episodes = discover_episodes(args.val_path)
     print(f"[INFO] Found {len(episodes)} episode(s) under {args.val_path}")
@@ -578,8 +552,7 @@ def main():
     if not episodes:
         raise RuntimeError("No episodes selected.")
 
-    raymap_tag = "raymap" if args.output_raymap else "noraymap"
-    args.output_dir = f"{args.output_dir}_{args.traj_radius_mode}_{raymap_tag}"
+    args.output_dir = f"{args.output_dir}_stage1only"
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"[INFO] Output directory: {args.output_dir}")
 
@@ -600,7 +573,7 @@ def main():
                 "--val_path",
                 args.val_path,
                 "--output_dir",
-                args.output_dir.rsplit(f"_{args.traj_radius_mode}_{raymap_tag}", 1)[0],
+                args.output_dir.removesuffix("_stage1only"),
                 "--device",
                 "cuda:0",
                 "--prompt",
@@ -672,7 +645,7 @@ def main():
                 cmd.append("--save_raymap_video")
             if not args.output_raymap:
                 cmd.append("--no_output_raymap")
-            cmd.extend(["--model_paths", json.dumps(args.model_paths)])
+            cmd.extend(["--model_paths", *args.model_paths])
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = gpu_id
             log_path = os.path.join(logs_dir, f"{ep['episode_key']}.log")

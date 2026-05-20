@@ -79,9 +79,11 @@ class VaceWan22CodexModel(torch.nn.Module):
             raise ValueError(
                 f"Expected vace_context with {self.vace_in_dim} channels, got {vace_context.shape[1]}."
             )
-
+        # vace_context: [1, 144, 5, 30, 14]
         c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
+        # [[1, 3072, 5, 15, 7]]
         c = [u.flatten(2).transpose(1, 2) for u in c]
+        # [[1, 525 = 5 * 15 * 7, 3072]]
         c = torch.cat(
             [
                 torch.cat(
@@ -123,7 +125,7 @@ class VaceWan22CodexModel(torch.nn.Module):
             else:
                 c = block(c, x, context, t_mod, freqs)
         return torch.unbind(c)[:-1]
-
+        # 得到每个VACE block的输出，形状都是 [1, 525, 3072]，对应每个块的提示向量
 
 class VaceWan22CodexModelDictConverter:
     def from_civitai(self, state_dict):

@@ -2,7 +2,7 @@
 Wan2.2 Codex VACE inference on one ARXX5 training episode.
 
 This script is aligned with Arxx5Dataset4Wancontrolmultiview training logic:
-- traj_map: FK(action) per-camera actions + FK(action) per-camera w2c
+- traj_map: per-camera actions + per-camera w2c
 - ray_map: center-base midpoint frame + per-camera w2c
 - raymap_mode: image
 - traj_radius_mode: perspective
@@ -34,14 +34,12 @@ from diffsynth.trainers.arxx5_dataset4_wancontrolmultiview import (
     generate_traj_map,
     get_color_intrinsics,
     load_calib_extrinsics,
-    make_ee_pose_from_action,
     make_center_ray_w2c_sequences,
     make_per_camera_sequences,
     read_video_rgb_by_indices,
     scale_intrinsic,
     to_uint8_img,
 )
-from diffsynth.trainers.arxx5_urdf_fk import configure as configure_fk
 
 try:
     import pyarrow.parquet as pq
@@ -79,10 +77,14 @@ def discover_episodes(agx_base, camera_names):
     return episodes
 
 
-def load_episode_action(parquet_path):
-    table = pq.read_table(parquet_path, columns=["action"])
-    action = np.asarray(table["action"].to_pylist(), dtype=np.float32)
-    return action
+def load_episode_arrays(parquet_path):
+    table = pq.read_table(parquet_path, columns=["observation.ee_pose", "observation.state"])
+    ee_pose = np.asarray(table["observation.ee_pose"].to_pylist(), dtype=np.float32)
+    state = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
+    # state[10:,6] = 3
+    # state[:,13] = 0
+    # ee_pose[101:200,:] = ee_pose_100
+    return ee_pose, state
 
 
 def get_video_len(path):
@@ -116,29 +118,32 @@ def select_episode(episodes, episode_index=None, episode_pos=0):
     return episodes[episode_pos]
 
 
-def freeze_selected_arms(action_ds, freeze_after_step, freeze_arm):
+def freeze_selected_arms(ee_ds, state_ds, freeze_after_step, freeze_arm):
     if freeze_after_step < 0:
-        return action_ds
+        return ee_ds, state_ds
 
-    if freeze_after_step >= len(action_ds):
+    if freeze_after_step >= len(ee_ds):
         raise ValueError(
-            f"--freeze_after_step={freeze_after_step} out of range for downsampled length {len(action_ds)}"
+            f"--freeze_after_step={freeze_after_step} out of range for downsampled length {len(ee_ds)}"
         )
 
-    action_ds = action_ds.copy()
+    ee_ds = ee_ds.copy()
+    state_ds = state_ds.copy()
 
     if freeze_arm in {"left", "both"}:
-        action_ds[freeze_after_step:, 0:7] = action_ds[freeze_after_step, 0:7]
+        ee_ds[freeze_after_step:, 0:7] = ee_ds[freeze_after_step, 0:7]
+        state_ds[freeze_after_step:, 6] = state_ds[freeze_after_step, 6]
 
     if freeze_arm in {"right", "both"}:
-        action_ds[freeze_after_step:, 7:14] = action_ds[freeze_after_step, 7:14]
+        ee_ds[freeze_after_step:, 7:14] = ee_ds[freeze_after_step, 7:14]
+        state_ds[freeze_after_step:, 13] = state_ds[freeze_after_step, 13]
 
-    return action_ds
+    return ee_ds, state_ds
 
 
 def build_episode_info(ep, args):
-    action = load_episode_action(ep["parquet_path"])
-    n = action.shape[0]
+    ee_pose, state = load_episode_arrays(ep["parquet_path"])
+    n = min(ee_pose.shape[0], state.shape[0])
     for cam in args.camera_names:
         n = min(n, get_video_len(ep["video_paths"][cam]))
 
@@ -146,9 +151,9 @@ def build_episode_info(ep, args):
         raise RuntimeError("Empty episode.")
 
     ds_idx = np.arange(0, n, args.downsample_step, dtype=np.int64)
-    action_ds = action[ds_idx]
-    action_ds = freeze_selected_arms(action_ds, args.freeze_after_step, args.freeze_arm)
-    fk_ee_pose_ds = make_ee_pose_from_action(action_ds)
+    ee_ds = ee_pose[ds_idx]
+    state_ds = state[ds_idx]
+    ee_ds, state_ds = freeze_selected_arms(ee_ds, state_ds, args.freeze_after_step, args.freeze_arm)
 
     extr = load_calib_extrinsics(
         Path(args.head_left_calib),
@@ -156,10 +161,8 @@ def build_episode_info(ep, args):
         Path(args.left_calib),
         Path(args.right_calib),
     )
-    traj_actions_by_cam, traj_w2c_by_cam = make_per_camera_sequences(
-        fk_ee_pose_ds, action_ds, extr, args.camera_axis_mode
-    )
-    ray_w2c_by_cam = make_center_ray_w2c_sequences(fk_ee_pose_ds, extr, args.camera_axis_mode)
+    traj_actions_by_cam, traj_w2c_by_cam = make_per_camera_sequences(ee_ds, state_ds, extr, args.camera_axis_mode)
+    ray_w2c_by_cam = make_center_ray_w2c_sequences(ee_ds, extr, args.camera_axis_mode)
 
     return {
         "episode_index": ep["episode_index"],
@@ -171,7 +174,6 @@ def build_episode_info(ep, args):
         "traj_actions_by_cam": traj_actions_by_cam,
         "traj_w2c_by_cam": traj_w2c_by_cam,
         "ray_w2c_by_cam": ray_w2c_by_cam,
-        "traj_source": "fk_action",
     }
 
 
@@ -382,7 +384,7 @@ def run_episode(pipe, ep_info, args):
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--agx_base", type=str, default="/mnt/workspace/zsq/arx_policy_rollout_new_continue")
+    parser.add_argument("--agx_base", type=str, default="/mnt/workspace/zsq/stack_blocks_bimanual_0513")
     parser.add_argument("--output_dir", type=str, default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/arxx5_train_episode_wan22_codex")
 
     parser.add_argument("--prompt", type=str, default="机械臂按照要求移动夹爪执行任务")
@@ -390,14 +392,14 @@ def main():
     parser.add_argument("--camera_axis_mode", type=str, default="identity", choices=["identity", "fixed", "frames3d"])
 
     parser.add_argument("--original_hz", type=int, default=30)
-    parser.add_argument("--target_hz", type=int, default=30)
-    parser.add_argument("--num_frames", type=int, default=17)
-    parser.add_argument("--predict_frames", type=int, default=16)
+    parser.add_argument("--target_hz", type=int, default=10)
+    parser.add_argument("--num_frames", type=int, default=9)
+    parser.add_argument("--predict_frames", type=int, default=8)
     parser.add_argument(
         "--freeze_after_step",
         type=int,
         default=-1,
-        help="Freeze action from this downsampled timestep onward; -1 disables freezing.",
+        help="Freeze ee_pose/state from this downsampled timestep onward; -1 disables freezing.",
     )
     parser.add_argument(
         "--freeze_arm",
@@ -438,9 +440,6 @@ def main():
     parser.add_argument("--head_right_calib", type=str, default="/mnt/data/zsq/outputs/calib_eye_to_hand_head_right/result_eye_to_hand.json")
     parser.add_argument("--left_calib", type=str, default="/mnt/data/zsq/outputs/calib_eye_in_hand_left/result_eye_in_hand.json")
     parser.add_argument("--right_calib", type=str, default="/mnt/data/zsq/outputs/calib_eye_in_hand_right/result_eye_in_hand.json")
-    parser.add_argument("--fk_urdf_path", type=str, default=None)
-    parser.add_argument("--fk_offset_path", type=str, default=None)
-    parser.add_argument("--fk_state_unit", type=str, default="rad", choices=["rad", "deg"])
 
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--save_control_video", action="store_true")
@@ -465,7 +464,7 @@ def main():
     parser.add_argument(
         "--vace_model_path",
         type=str,
-        default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-TI2V-5B-VACE-wan22-codex-ray-action-perspective-arxx5-rolloutdatasetnew/epoch-99.safetensors",
+        default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.2-TI2V-5B-VACE-wan22-codex-ray-action-perspective-arxx5-newdataset/epoch-229.safetensors",
         help="Path to VACE-only checkpoint exported with remove_prefix_in_ckpt=pipe.vace.",
     )
 
@@ -478,7 +477,6 @@ def main():
     args.base_model_paths = json.loads(args.base_model_paths)
 
     args.downsample_step = args.original_hz // args.target_hz
-    configure_fk(urdf_path=args.fk_urdf_path, offset_path=args.fk_offset_path, state_unit=args.fk_state_unit)
 
     episodes = discover_episodes(args.agx_base, args.camera_names)
     print(f"[INFO] discovered episodes: {len(episodes)}")
@@ -489,7 +487,6 @@ def main():
     )
 
     ep_info = build_episode_info(selected, args)
-    print(f"[INFO] traj_source={ep_info['traj_source']}")
     if args.freeze_after_step >= 0:
         freeze_raw_idx = int(ep_info["ds_indices"][args.freeze_after_step])
         print(

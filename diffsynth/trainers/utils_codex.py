@@ -341,7 +341,7 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
         self.camera_sample_mode = camera_sample_mode
         self.output_global_reference = output_global_reference
         self.downsample_step = original_hz // target_hz
-
+        self.load_from_cache = False
         print(
             f"[AgiBotWCDataset4Wancontrolmultiview] Downsample: "
             f"{original_hz}Hz -> {target_hz}Hz (step={self.downsample_step})"

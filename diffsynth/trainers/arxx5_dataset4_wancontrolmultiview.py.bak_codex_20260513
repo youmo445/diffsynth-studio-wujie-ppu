@@ -31,13 +31,6 @@ except Exception:
     VideoReader = None
     cpu = None
 
-try:
-    from .arxx5_urdf_fk import configure as configure_fk
-    from .arxx5_urdf_fk import left_fk, right_fk
-except ImportError:
-    from arxx5_urdf_fk import configure as configure_fk
-    from arxx5_urdf_fk import left_fk, right_fk
-
 CAMERAS = ("head", "left_wrist", "right_wrist")
 ColorListLeft = [(0, 0, 255), (255, 255, 0), (0, 255, 255)]
 ColorListRight = [(255, 0, 255), (255, 0, 0), (0, 255, 0)]
@@ -166,15 +159,6 @@ def make_abs_actions_from_poses(left_pose_qwxyz: np.ndarray, right_pose_qwxyz: n
     out[:, 7] = normalize_to_0_120(state[:, 6])
     out[:, 15] = normalize_to_0_120(state[:, 13])
     return out
-
-
-def make_ee_pose_from_action(action: np.ndarray) -> np.ndarray:
-    action = np.asarray(action, dtype=np.float32)
-    if action.ndim != 2 or action.shape[1] < 14:
-        raise ValueError(f"Expected action shape [T, >=14], got {action.shape}")
-    left_pose_qwxyz = left_fk(action[:, 0:6])
-    right_pose_qwxyz = right_fk(action[:, 7:13])
-    return np.concatenate([left_pose_qwxyz, right_pose_qwxyz], axis=1).astype(np.float32)
 
 
 def grip_to_left_color(v: float) -> Tuple[int, int, int]:
@@ -567,8 +551,6 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
         repeat: int = 1,
         episode_stride: int = 1,
         episode_limit: Optional[int] = None,
-        episode_indices: Optional[Sequence[int]] = None,
-        exclude_episode_indices: Optional[Sequence[int]] = None,
         original_hz: Optional[float] = 30,
         target_hz: Optional[float] = 30,
         stride: int = 1,
@@ -596,9 +578,6 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
         head_right_calib: str = "/mnt/data/zsq/outputs/calib_eye_to_hand_head_right/result_eye_to_hand.json",
         left_calib: str = "/mnt/data/zsq/outputs/calib_eye_in_hand_left/result_eye_in_hand.json",
         right_calib: str = "/mnt/data/zsq/outputs/calib_eye_in_hand_right/result_eye_in_hand.json",
-        fk_urdf_path: Optional[str] = None,
-        fk_offset_path: Optional[str] = None,
-        fk_state_unit: str = "rad",
         prompt: str = "机械臂按照要求移动夹爪执行任务",
     ):
         super().__init__()
@@ -640,7 +619,6 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
         self.prompt = prompt
         self.intrinsics = get_color_intrinsics()
         self.extr = load_calib_extrinsics(Path(head_left_calib), Path(head_right_calib), Path(left_calib), Path(right_calib))
-        configure_fk(urdf_path=fk_urdf_path, offset_path=fk_offset_path, state_unit=fk_state_unit)
         self.load_from_cache = False
         self.info_json = load_json(self.base_path / "meta" / "info.json")
         fps = float(original_hz if original_hz is not None else self.info_json.get("fps", target_hz or 5))
@@ -652,12 +630,6 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
             self.output_fps = float(target_hz)
 
         episodes = self._discover_episodes()
-        if episode_indices is not None:
-            include_indices = {int(idx) for idx in episode_indices}
-            episodes = [ep for ep in episodes if ep["episode_index"] in include_indices]
-        if exclude_episode_indices is not None:
-            exclude_indices = {int(idx) for idx in exclude_episode_indices}
-            episodes = [ep for ep in episodes if ep["episode_index"] not in exclude_indices]
         if episode_limit is not None:
             episodes = episodes[: int(episode_limit)]
         self.episodes = episodes[:: int(episode_stride)]
@@ -676,7 +648,7 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
 
         self.total_samples = len(self.sample_indices)
         self.length = self.total_samples * self.repeat
-        print(f"[Arxx5Dataset] base={self.base_path}, fps={fps}, target_hz={target_hz}, step={self.downsample_step}, episodes={len(self.episode_info)}, samples={self.total_samples}, traj=fk_action_per_camera, raymap=center_base")
+        print(f"[Arxx5Dataset] fps={fps}, target_hz={target_hz}, step={self.downsample_step}, episodes={len(self.episode_info)}, samples={self.total_samples}, traj=per_camera, raymap=center_base")
 
     def _discover_episodes(self) -> List[dict]:
         data_dir = self.base_path / "data"
@@ -694,22 +666,24 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
                 out.append({"episode_index": episode_index, "parquet_path": parquet_path, "video_paths": video_paths})
         return out
 
-    def _load_episode_action(self, parquet_path: Path) -> np.ndarray:
-        table = pq.read_table(parquet_path, columns=["action"])
-        return np.asarray(table["action"].to_pylist(), dtype=np.float32)
+    def _load_episode_arrays(self, parquet_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+        table = pq.read_table(parquet_path, columns=["observation.ee_pose", "observation.state"])
+        ee_pose = np.asarray(table["observation.ee_pose"].to_pylist(), dtype=np.float32)
+        state = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
+        return ee_pose, state
 
     def _build_episode_info(self, ep: dict) -> Optional[dict]:
-        action = self._load_episode_action(ep["parquet_path"])
-        n = action.shape[0]
+        ee_pose, state = self._load_episode_arrays(ep["parquet_path"])
+        n = min(ee_pose.shape[0], state.shape[0])
         for cam in self.camera_names:
             n = min(n, get_video_len(ep["video_paths"][cam]))
         if n < self.num_frames:
             return None
         raw_idx = np.arange(0, n, self.downsample_step, dtype=np.int64)
-        action_ds = action[raw_idx]
-        fk_ee_pose_ds = make_ee_pose_from_action(action_ds)
-        traj_actions_by_cam, traj_w2c_by_cam = make_per_camera_sequences(fk_ee_pose_ds, action_ds, self.extr, self.camera_axis_mode)
-        ray_w2c_by_cam = make_center_ray_w2c_sequences(fk_ee_pose_ds, self.extr, self.camera_axis_mode)
+        ee_ds = ee_pose[raw_idx]
+        state_ds = state[raw_idx]
+        traj_actions_by_cam, traj_w2c_by_cam = make_per_camera_sequences(ee_ds, state_ds, self.extr, self.camera_axis_mode)
+        ray_w2c_by_cam = make_center_ray_w2c_sequences(ee_ds, self.extr, self.camera_axis_mode)
         return {
             "episode_index": ep["episode_index"],
             "parquet_path": ep["parquet_path"],
@@ -719,7 +693,6 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
             "traj_actions_by_cam": traj_actions_by_cam,
             "traj_w2c_by_cam": traj_w2c_by_cam,
             "ray_w2c_by_cam": ray_w2c_by_cam,
-            "traj_source": "fk_action",
         }
 
     def __len__(self) -> int:
@@ -864,8 +837,9 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
             "frame_ids_ds": frame_ids.tolist(),
             "frame_ids_raw": [int(info["ds_indices"][int(fid)]) for fid in frame_ids],
             "camera_names": active_cams,
-            "traj_map_frame": "fk_action_per_camera_actions_and_fk_action_per_camera_w2c",
+            "traj_map_frame": "original_per_camera_actions_and_original_per_camera_w2c",
             "raymap_frame": "center_base_midpoint_between_left_and_right_bases",
-            "traj_source": info.get("traj_source", "fk_action"),
         }
         return sample
+
+

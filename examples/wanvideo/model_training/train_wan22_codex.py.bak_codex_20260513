@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 import torch
 from PIL import Image
@@ -53,10 +52,8 @@ class WanTrainingModule(DiffusionTrainingModule):
         )
         created_vace = getattr(self.pipe, "vace", None) is None
         if created_vace:
-            # Wan2.2 VACE 初始化
             self.pipe.vace = VaceWan22CodexModel(vace_in_dim=wan22_vace_in_dim).to(dtype=self.pipe.torch_dtype)
         if created_vace and not wan22_vace_random_init:
-            # 从Wan2.2 TI2V 5B 的DiT权重初始化Wan2.2 Codex VACE模块
             summaries = self.pipe.vace.init_from_dit(self.pipe.dit)
             print(f"Initialized Wan2.2 Codex VACE blocks from DiT: {len(summaries)} blocks.")
 
@@ -157,42 +154,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--agibot_multiview_base_path",
         type=str,
-        nargs="+",
-        default=["/mnt/data/zsq/Agi2024subset_split"],
-        help="One or more base directories for AgiBot/Arxx5 multiview VACE training.",
-    )
-    parser.add_argument(
-        "--agibot_multiview_val_base_path",
-        type=str,
-        default=None,
-        help="Validation base directory for Arxx5 multiview training. Defaults to the first train base path.",
-    )
-    parser.add_argument(
-        "--agibot_multiview_val_tail_episodes",
-        type=int,
-        default=0,
-        help="Use the last N episodes from the validation base path as validation, excluding them from training if that base is also in train paths.",
+        default="/mnt/data/zsq/Agi2024subset_split",
+        help="Base directory containing train/ and val/ for AgiBot multiview VACE training.",
     )
     args = parser.parse_args()
     val_camera_sample_mode = args.dataset_val_camera_sample_mode or args.dataset_camera_sample_mode
-
-    def discover_episode_indices(base_path: str):
-        data_dir = Path(base_path) / "data"
-        indices = []
-        for parquet_path in sorted(data_dir.glob("chunk-*/episode_*.parquet")):
-            try:
-                indices.append(int(parquet_path.stem.split("_")[-1]))
-            except ValueError:
-                continue
-        return sorted(set(indices))
-
-    def tail_episode_indices(base_path: str, tail_count: int):
-        if tail_count <= 0:
-            return None
-        indices = discover_episode_indices(base_path)
-        if len(indices) < tail_count:
-            raise ValueError(f"Only found {len(indices)} episodes in {base_path}, cannot take last {tail_count}")
-        return indices[-tail_count:]
 
     if args.dataset == "AgisubDataset":
         dataset = AgiBotWCDataset4WanControl(
@@ -226,7 +192,7 @@ if __name__ == "__main__":
         )
     elif args.dataset == "AgisubDatasetvacemultiview":
         dataset = AgiBotWCDataset4WanControlmultiview(
-            base_path=os.path.join(args.agibot_multiview_base_path[0], "train"),
+            base_path=os.path.join(args.agibot_multiview_base_path, "train"),
             num_frames=args.num_frames,
             context_length=1,
             repeat=args.dataset_repeat,
@@ -238,7 +204,7 @@ if __name__ == "__main__":
             camera_sample_mode=args.dataset_camera_sample_mode,
         )
         val_dataset = AgiBotWCDataset4WanControlmultiview(
-            base_path=os.path.join(args.agibot_multiview_base_path[0], "val"),
+            base_path=os.path.join(args.agibot_multiview_base_path, "val"),
             num_frames=args.num_frames,
             context_length=1,
             repeat=args.dataset_repeat,
@@ -250,41 +216,29 @@ if __name__ == "__main__":
             camera_sample_mode=val_camera_sample_mode,
         )
     elif args.dataset == "Arxx5Dataset4Wancontrolmultiview":
-        arxx5_common_kwargs = dict(
+        dataset = Arxx5Dataset4Wancontrolmultiview(
+            base_path=os.path.join(args.agibot_multiview_base_path),
             num_frames=args.num_frames,
-            context_length=5,
+            context_length=1,
             repeat=args.dataset_repeat,
             dataset_type="vace",
             output_raymap=args.dataset_output_raymap,
             raymap_mode=args.dataset_raymap_mode,
             traj_radius_mode=args.dataset_traj_radius_mode,
             camera_names=args.dataset_camera_names,
-            target_hz=30,
+            camera_sample_mode=args.dataset_camera_sample_mode,
         )
-        val_base_path = args.agibot_multiview_val_base_path or args.agibot_multiview_base_path[0]
-        val_episode_indices = tail_episode_indices(val_base_path, args.agibot_multiview_val_tail_episodes)
-        train_datasets = []
-        val_base_abs = os.path.abspath(val_base_path)
-        for base_path in args.agibot_multiview_base_path:
-            exclude_episode_indices = val_episode_indices if os.path.abspath(base_path) == val_base_abs else None
-            train_datasets.append(
-                Arxx5Dataset4Wancontrolmultiview(
-                    base_path=base_path,
-                    camera_sample_mode=args.dataset_camera_sample_mode,
-                    exclude_episode_indices=exclude_episode_indices,
-                    **arxx5_common_kwargs,
-                )
-            )
-        if len(train_datasets) == 1:
-            dataset = train_datasets[0]
-        else:
-            dataset = torch.utils.data.ConcatDataset(train_datasets)
-            dataset.load_from_cache = all(getattr(ds, "load_from_cache", False) for ds in train_datasets)
         val_dataset = Arxx5Dataset4Wancontrolmultiview(
-            base_path=val_base_path,
+            base_path=os.path.join(args.agibot_multiview_base_path),
+            num_frames=args.num_frames,
+            context_length=1,
+            repeat=args.dataset_repeat,
+            dataset_type="vace",
+            output_raymap=args.dataset_output_raymap,
+            raymap_mode=args.dataset_raymap_mode,
+            traj_radius_mode=args.dataset_traj_radius_mode,
+            camera_names=args.dataset_camera_names,
             camera_sample_mode=val_camera_sample_mode,
-            episode_indices=val_episode_indices,
-            **arxx5_common_kwargs,
         )
     else:
         dataset = UnifiedDataset(
