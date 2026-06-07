@@ -265,7 +265,7 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        base_path="/mnt/workspace/zsq/Agi2024subset_split/train",
+        base_path="/mnt/data/zsq/Agi2024subset_split/train",
         num_frames=9,
         repeat=1,
         episode_stride=1,
@@ -305,14 +305,14 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
             raise ValueError(f"Unsupported raymap_mode: {raymap_mode}")
 
         self.base_path = base_path
-        if os.path.normpath(base_path).startswith(os.path.normpath("/mnt/workspace/zsq/Agi2024subset_split")):
+        if os.path.normpath(base_path).startswith(os.path.normpath("/mnt/data/zsq/Agi2024subset_split")):
             self.video_base_path = base_path.replace(
-                "/mnt/workspace/zsq/Agi2024subset_split",
-                "/mnt/workspace/zsq/Agi2024subset_split_h264",
+                "/mnt/data/zsq/Agi2024subset_split",
+                "/mnt/data/zsq/Agi2024subset_split_h264",
                 1,
             )
         else:
-            raise NotImplementedError('avi2h264 conversion is only supported for paths starting with "/mnt/workspace/zsq/Agi2024subset_split"')
+            raise NotImplementedError('avi2h264 conversion is only supported for paths starting with "/mnt/data/zsq/Agi2024subset_split"')
             self.video_base_path = base_path
         self.num_frames = num_frames
         self.repeat = repeat
@@ -341,7 +341,7 @@ class AgiBotWCDataset4Wancontrolmultiview(torch.utils.data.Dataset):
         self.camera_sample_mode = camera_sample_mode
         self.output_global_reference = output_global_reference
         self.downsample_step = original_hz // target_hz
-
+        self.load_from_cache = False
         print(
             f"[AgiBotWCDataset4Wancontrolmultiview] Downsample: "
             f"{original_hz}Hz -> {target_hz}Hz (step={self.downsample_step})"
@@ -776,7 +776,7 @@ AgiBotWCDataset4WanControlmultiview = AgiBotWCDataset4Wancontrolmultiview
 
 def save_multiview_dataset_visualization(
     out_dir,
-    base_path="/mnt/workspace/zsq/Agi2024subset_split/train",
+    base_path="/mnt/data/zsq/Agi2024subset_split/train",
     sample_index=200,
     num_frames=9,
     episode_limit=2,
@@ -814,7 +814,7 @@ def save_multiview_dataset_visualization(
 
 def save_radius_mode_comparison_visualizations(
     out_dir,
-    base_path="/mnt/workspace/zsq/Agi2024subset_split/train",
+    base_path="/mnt/data/zsq/Agi2024subset_split/train",
     sample_index=200,
     num_frames=9,
     episode_limit=2,
@@ -838,7 +838,7 @@ def save_radius_mode_comparison_visualizations(
 
 def save_raymap_visualization(
     out_dir,
-    base_path="/mnt/workspace/zsq/Agi2024subset_split/train",
+    base_path="/mnt/data/zsq/Agi2024subset_split/train",
     sample_index=200,
     num_frames=9,
     episode_limit=2,

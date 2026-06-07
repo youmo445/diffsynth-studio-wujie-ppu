@@ -1,13 +1,20 @@
+"""
+Lightweight FPS benchmark for multiview Wan VACE inference.
+
+Fixed benchmark setting by default:
+- three-view concatenated input
+- traj_radius_mode = perspective
+- output_raymap = True
+
+The goal is to measure generation speed over several autoregressive chunks,
+so this script avoids saving videos and reports per-chunk / overall FPS.
+"""
+
 import argparse
 import json
 import math
 import os
-import sys
 import time
-
-WUJIE_REPO = "/data/zsq/diffsynth-studio-wujie-ppu"
-if WUJIE_REPO not in sys.path:
-    sys.path.insert(0, WUJIE_REPO)
 
 import h5py
 import imageio.v3 as iio
@@ -245,42 +252,41 @@ def build_episode_controls(ep_info, args):
             far_depth=args.traj_far_depth,
         )
 
-        if args.output_raymap:
-            ray_o_seq = []
-            ray_d_seq = []
-            if args.raymap_mode == "latent":
-                latent_h = args.view_height // 8
-                latent_w = args.view_width // 8
-                latent_intrinsic = intrinsic.copy()
-                latent_intrinsic[0, 0] *= latent_w / args.view_width
-                latent_intrinsic[0, 2] *= latent_w / args.view_width
-                latent_intrinsic[1, 1] *= latent_h / args.view_height
-                latent_intrinsic[1, 2] *= latent_h / args.view_height
-                for t in range(total_frames):
-                    ray_o, ray_d = generate_raw_raymap(
-                        intrinsic=latent_intrinsic,
-                        c2w=cam_info["c2w"][t],
-                        height=latent_h,
-                        width=latent_w,
-                    )
-                    ray_o_seq.append(ray_o)
-                    ray_d_seq.append(ray_d)
-            else:
-                for t in range(total_frames):
-                    ray_o, ray_d = generate_raymap(
-                        intrinsic=intrinsic,
-                        c2w=cam_info["c2w"][t],
-                        height=args.view_height,
-                        width=args.view_width,
-                        ray_o_vmin=np.array(args.ray_o_vmin, dtype=np.float32),
-                        ray_o_vmax=np.array(args.ray_o_vmax, dtype=np.float32),
-                        ray_d_vmin=np.array(args.ray_d_vmin, dtype=np.float32),
-                        ray_d_vmax=np.array(args.ray_d_vmax, dtype=np.float32),
-                    )
-                    ray_o_seq.append(ray_o)
-                    ray_d_seq.append(ray_d)
-            ray_o_frames_per_cam[cam] = ray_o_seq
-            ray_d_frames_per_cam[cam] = ray_d_seq
+        ray_o_seq = []
+        ray_d_seq = []
+        if args.raymap_mode == "latent":
+            latent_h = args.view_height // 8
+            latent_w = args.view_width // 8
+            latent_intrinsic = intrinsic.copy()
+            latent_intrinsic[0, 0] *= latent_w / args.view_width
+            latent_intrinsic[0, 2] *= latent_w / args.view_width
+            latent_intrinsic[1, 1] *= latent_h / args.view_height
+            latent_intrinsic[1, 2] *= latent_h / args.view_height
+            for t in range(total_frames):
+                ray_o, ray_d = generate_raw_raymap(
+                    intrinsic=latent_intrinsic,
+                    c2w=cam_info["c2w"][t],
+                    height=latent_h,
+                    width=latent_w,
+                )
+                ray_o_seq.append(ray_o)
+                ray_d_seq.append(ray_d)
+        else:
+            for t in range(total_frames):
+                ray_o, ray_d = generate_raymap(
+                    intrinsic=intrinsic,
+                    c2w=cam_info["c2w"][t],
+                    height=args.view_height,
+                    width=args.view_width,
+                    ray_o_vmin=np.array(args.ray_o_vmin, dtype=np.float32),
+                    ray_o_vmax=np.array(args.ray_o_vmax, dtype=np.float32),
+                    ray_d_vmin=np.array(args.ray_d_vmin, dtype=np.float32),
+                    ray_d_vmax=np.array(args.ray_d_vmax, dtype=np.float32),
+                )
+                ray_o_seq.append(ray_o)
+                ray_d_seq.append(ray_d)
+        ray_o_frames_per_cam[cam] = ray_o_seq
+        ray_d_frames_per_cam[cam] = ray_d_seq
 
     control_video = []
     ray_map_o = []
@@ -289,14 +295,14 @@ def build_episode_controls(ep_info, args):
         control_video.append(
             Image.fromarray(np.concatenate([control_frames_per_cam[cam][t] for cam in camera_names], axis=0))
         )
-        if args.output_raymap and args.raymap_mode == "image":
+        if args.raymap_mode == "image":
             ray_map_o.append(
                 Image.fromarray(np.concatenate([ray_o_frames_per_cam[cam][t] for cam in camera_names], axis=0))
             )
             ray_map_d.append(
                 Image.fromarray(np.concatenate([ray_d_frames_per_cam[cam][t] for cam in camera_names], axis=0))
             )
-    if args.output_raymap and args.raymap_mode == "latent":
+    if args.raymap_mode == "latent":
         ray_o_latents = []
         ray_d_latents = []
         for t in range(total_frames):
@@ -327,6 +333,8 @@ def load_pipe(base_model_paths, vace_model_path, device):
         state_dict = load_state_dict(vace_model_path)
         if any(name.startswith("vace_global_") for name in state_dict):
             pipe.vace.enable_global_cross_attn(global_context_dim=16)
+        if any(name.startswith("vace_ray_o_adapter.") or name.startswith("vace_ray_d_adapter.") for name in state_dict):
+            pipe.vace.enable_latent_raymap_adapter()
         pipe.vace.load_state_dict(state_dict)
     return pipe
 
@@ -359,6 +367,16 @@ def benchmark_episode(pipe, ep_info, args):
             "prompt": args.prompt,
             "vace_video": get_chunk_with_pad(control_video, context_idx, args.num_frames),
             "vace_reference_image": current_context,
+            "ray_map_o": (
+                get_latent_chunk_with_pad(ray_map_o, context_idx, args.num_frames)
+                if args.raymap_mode == "latent"
+                else get_chunk_with_pad(ray_map_o, context_idx, args.num_frames)
+            ),
+            "ray_map_d": (
+                get_latent_chunk_with_pad(ray_map_d, context_idx, args.num_frames)
+                if args.raymap_mode == "latent"
+                else get_chunk_with_pad(ray_map_d, context_idx, args.num_frames)
+            ),
             "height": total_height,
             "width": args.view_width,
             "num_frames": args.num_frames,
@@ -367,17 +385,6 @@ def benchmark_episode(pipe, ep_info, args):
             "seed": args.seed + chunk_idx,
             "tiled": False,
         }
-        if args.output_raymap:
-            pipe_kwargs["ray_map_o"] = (
-                get_latent_chunk_with_pad(ray_map_o, context_idx, args.num_frames)
-                if args.raymap_mode == "latent"
-                else get_chunk_with_pad(ray_map_o, context_idx, args.num_frames)
-            )
-            pipe_kwargs["ray_map_d"] = (
-                get_latent_chunk_with_pad(ray_map_d, context_idx, args.num_frames)
-                if args.raymap_mode == "latent"
-                else get_chunk_with_pad(ray_map_d, context_idx, args.num_frames)
-            )
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -431,7 +438,7 @@ def benchmark_episode(pipe, ep_info, args):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--val_path", type=str, default="/data/zsq/agibot2024/Agi2024subset_split/val")
+    parser.add_argument("--val_path", type=str, default="/mnt/workspace/zsq/Agi2024subset_split/val")
     parser.add_argument("--episode_index", type=int, default=0)
     parser.add_argument("--num_chunks", type=int, default=5)
     parser.add_argument("--warmup_chunks", type=int, default=1)
@@ -440,8 +447,8 @@ def parse_args():
     parser.add_argument("--camera_names", nargs="+", default=["head", "hand_left", "hand_right"])
     parser.add_argument("--orig_height", type=int, default=480)
     parser.add_argument("--orig_width", type=int, default=640)
-    parser.add_argument("--view_height", type=int, default=320)
-    parser.add_argument("--view_width", type=int, default=512)
+    parser.add_argument("--view_height", type=int, default=480)
+    parser.add_argument("--view_width", type=int, default=640)
     parser.add_argument("--original_hz", type=int, default=30)
     parser.add_argument("--target_hz", type=int, default=5)
     parser.add_argument("--predict_frames", type=int, default=8)
@@ -455,8 +462,6 @@ def parse_args():
     parser.add_argument("--traj_ref_depth", type=float, default=1.0)
     parser.add_argument("--traj_near_depth", type=float, default=0.3)
     parser.add_argument("--traj_far_depth", type=float, default=2.0)
-    parser.add_argument("--output_raymap", action="store_true", default=True)
-    parser.add_argument("--no_output_raymap", dest="output_raymap", action="store_false")
     parser.add_argument("--raymap_mode", type=str, default="image", choices=["image", "latent"])
     parser.add_argument("--ray_o_vmin", type=float, nargs=3, default=[-1.5, -1.5, -1.5])
     parser.add_argument("--ray_o_vmax", type=float, nargs=3, default=[1.5, 1.5, 1.5])
@@ -466,15 +471,15 @@ def parse_args():
         "--base_model_paths",
         nargs="+",
         default=[
-            "/data/zsq/Wan2.1-1.3B-VACE/diffusion_pytorch_model.safetensors",
-            "/data/zsq/Wan2.1-1.3B-VACE/models_t5_umt5-xxl-enc-bf16.pth",
-            "/data/zsq/Wan2.1-1.3B-VACE/Wan2.1_VAE.pth",
+            "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-1.3B/diffusion_pytorch_model.safetensors",
+            "/mnt/workspace/zsq/Wan_model/Wan2.2-Fun-A14B-Control/models_t5_umt5-xxl-enc-bf16.pth",
+            "/mnt/workspace/zsq/Wan_model/Wan2.2-Fun-A14B-Control/Wan2.1_VAE.pth",
         ],
     )
     parser.add_argument(
         "--vace_model_path",
         type=str,
-        default="/data/zsq/diffsynth-studio-wujie-ppu/outputs/Wan2.1-VACE-1.3B-multiview-constant-noraymap/epoch-79.safetensors",
+        default="/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-1.3B-multiview-perspective/epoch-9.safetensors",
     )
     parser.add_argument("--output_json", type=str, default="")
     args = parser.parse_args()

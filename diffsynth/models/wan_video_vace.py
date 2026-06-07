@@ -38,6 +38,7 @@ class VaceWanModel(torch.nn.Module):
         eps=1e-6,
         enable_global_cross_attn=False,
         global_context_dim=16,
+        enable_latent_raymap_adapter=False,
     ):
         super().__init__()
         self.vace_layers = vace_layers
@@ -54,9 +55,37 @@ class VaceWanModel(torch.nn.Module):
 
         # vace patch embeddings
         self.vace_patch_embedding = torch.nn.Conv3d(vace_in_dim, dim, kernel_size=patch_size, stride=patch_size)
+        self.vace_latent_raymap_adapter_enabled = False
+        if enable_latent_raymap_adapter:
+            self.enable_latent_raymap_adapter()
         self.vace_global_enabled = False
         if enable_global_cross_attn:
             self.enable_global_cross_attn(global_context_dim=global_context_dim)
+
+    def enable_latent_raymap_adapter(self):
+        if self.vace_latent_raymap_adapter_enabled:
+            return
+        ref = next(self.parameters())
+        self.vace_ray_o_adapter = torch.nn.Conv3d(12, 16, kernel_size=1, bias=False)
+        self.vace_ray_d_adapter = torch.nn.Conv3d(12, 16, kernel_size=1, bias=False)
+        self.vace_latent_raymap_adapter_enabled = True
+        self.vace_ray_o_adapter.to(device=ref.device, dtype=ref.dtype)
+        self.vace_ray_d_adapter.to(device=ref.device, dtype=ref.dtype)
+
+    def _adapt_latent_raymap_context(self, u):
+        if not self.vace_latent_raymap_adapter_enabled:
+            return u
+        if u.shape[0] != 96:
+            raise ValueError(f"Latent raymap adapter expects 96-channel VACE context, got {tuple(u.shape)}")
+        inactive = u[0:16]
+        reactive = u[16:32]
+        ray_o = u[32:44].unsqueeze(0)
+        ray_d = u[44:56].unsqueeze(0)
+        mask = u[56:96]
+        ray_o = self.vace_ray_o_adapter(ray_o).squeeze(0)
+        ray_d = self.vace_ray_d_adapter(ray_d).squeeze(0)
+        mask = mask[:32]
+        return torch.cat((inactive, reactive, ray_o, ray_d, mask), dim=0)
 
     def enable_global_cross_attn(self, global_context_dim=16):
         if self.vace_global_enabled:
@@ -83,7 +112,7 @@ class VaceWanModel(torch.nn.Module):
         use_gradient_checkpointing: bool = False,
         use_gradient_checkpointing_offload: bool = False,
     ):
-        c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
+        c = [self.vace_patch_embedding(self._adapt_latent_raymap_context(u).unsqueeze(0)) for u in vace_context]
         c = [u.flatten(2).transpose(1, 2) for u in c]
         c = torch.cat([
             torch.cat([u, u.new_zeros(1, x.shape[1] - u.size(1), u.size(2))],
@@ -159,4 +188,6 @@ class VaceWanModelDictConverter:
             config = {}
         if any(name.startswith("vace_global_") for name in state_dict_):
             config["enable_global_cross_attn"] = True
+        if any(name.startswith("vace_ray_o_adapter.") or name.startswith("vace_ray_d_adapter.") for name in state_dict_):
+            config["enable_latent_raymap_adapter"] = True
         return state_dict_, config

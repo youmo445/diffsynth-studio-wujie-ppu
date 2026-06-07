@@ -62,6 +62,7 @@ from ..models.wan_video_image_encoder import WanImageEncoder
 from ..models.wan_video_vae import WanVideoVAE, WanVideoVAE38
 from ..models.wan_video_motion_controller import WanMotionControllerModel
 from ..models.wan_video_vace import VaceWanModel
+from ..models.wan_video_vace_wan22_codex import VaceWan22CodexModel
 from ..models.wav2vec import WanS2VAudioEncoder
 from ..models.wan_video_animate_adapter import WanAnimateAdapter
 from ..models.wan_video_mot import MotWanModel
@@ -161,6 +162,10 @@ model_loader_configs = [
     (None, "5f90e66a0672219f12d9a626c8c21f61", ["wan_video_dit", "wan_video_vap"], [WanModel,MotWanModel], "diffusers"),
     (None, "a61453409b67cd3246cf0c3bebad47ba", ["wan_video_dit", "wan_video_vace"], [WanModel, VaceWanModel], "civitai"),
     (None, "7a513e1f257a861512b1afd387a8ecd9", ["wan_video_dit", "wan_video_vace"], [WanModel, VaceWanModel], "civitai"),
+    (None, "76a5ad1240f3874a97a65523f09dc31e", ["wan_video_dit", "wan_video_vace"], [WanModel, VaceWan22CodexModel], "civitai"),
+    (None, "01ce5cd9dbe97a0f53309924bb406bb9", ["wan_video_dit"], [WanModel], "civitai"),
+    (None, "9f9d66c468265c1fa8ac20a62a0f6aa6", ["wan_video_vace"], [VaceWan22CodexModel], "civitai"),
+    (None, "5ef6e07a4e77205afa7c861aecc09e72", ["wan_video_vace"], [VaceWan22CodexModel], "civitai"),
     (None, "cb104773c6c2cb6df4f9529ad5c60d0b", ["wan_video_dit"], [WanModel], "diffusers"),
     (None, "966cffdcc52f9c46c391768b27637614", ["wan_video_dit"], [WanS2VModel], "civitai"),
     (None, "8b27900f680d7251ce44e2dc8ae1ffef", ["wan_video_dit"], [LongCatVideoTransformer3DModel], "civitai"),

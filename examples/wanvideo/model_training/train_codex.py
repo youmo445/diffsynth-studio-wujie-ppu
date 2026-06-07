@@ -21,6 +21,7 @@ class WanTrainingModule(DiffusionTrainingModule):
         max_timestep_boundary=1.0,
         min_timestep_boundary=0.0,
         enable_vace_global_cross_attn=False,
+        enable_vace_latent_raymap_adapter=False,
     ):
         super().__init__()
         # Load models
@@ -28,6 +29,12 @@ class WanTrainingModule(DiffusionTrainingModule):
         if audio_processor_config is not None:
             audio_processor_config = ModelConfig(model_id=audio_processor_config.split(":")[0], origin_file_pattern=audio_processor_config.split(":")[1])
         self.pipe = WanVideoPipeline.from_pretrained(torch_dtype=torch.bfloat16, device="cpu", model_configs=model_configs, audio_processor_config=audio_processor_config)
+        if enable_vace_latent_raymap_adapter:
+            if self.pipe.vace is None:
+                raise ValueError("--enable_vace_latent_raymap_adapter requires a VACE model.")
+            self.pipe.vace.enable_latent_raymap_adapter()
+            if self.pipe.vace2 is not None:
+                self.pipe.vace2.enable_latent_raymap_adapter()
         
         # Training mode
         self.switch_pipe_to_training_mode(
@@ -146,6 +153,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Encode all-view reference images with Wan VAE and let VACE tokens cross-attend them.",
     )
+    parser.add_argument(
+        "--enable_vace_latent_raymap_adapter",
+        action="store_true",
+        help="Map raw latent ray_o/ray_d channels to VAE-like 16-channel features inside VACE.",
+    )
     args = parser.parse_args()
     val_camera_sample_mode = args.dataset_val_camera_sample_mode or args.dataset_camera_sample_mode
 
@@ -244,6 +256,7 @@ if __name__ == "__main__":
         max_timestep_boundary=args.max_timestep_boundary,
         min_timestep_boundary=args.min_timestep_boundary,
         enable_vace_global_cross_attn=args.enable_vace_global_cross_attn,
+        enable_vace_latent_raymap_adapter=args.enable_vace_latent_raymap_adapter,
     )
     model_logger = ModelLogger(
         args.output_path,

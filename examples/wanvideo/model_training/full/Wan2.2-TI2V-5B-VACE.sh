@@ -7,7 +7,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 accelerate launch \
     ["/mnt/workspace/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00001-of-00003.safetensors",
     "/mnt/workspace/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00002-of-00003.safetensors",
     "/mnt/workspace/zsq/Wan_model/Wan2.2-TI2V-5B/diffusion_pytorch_model-00003-of-00003.safetensors"],
-    "/mnt/workspace/zsq/DiffSynth-Studio/outputs/Wan2.1-VACE-14B/epoch-0.safetensors",
     "/mnt/workspace/zsq/Wan_model/Wan2.1-VACE-14B/models_t5_umt5-xxl-enc-bf16.pth",
     "/mnt/workspace/zsq/Wan_model/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
   ]' \
