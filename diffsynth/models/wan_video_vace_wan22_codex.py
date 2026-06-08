@@ -4,11 +4,11 @@ from .wan_video_vace import VaceWanAttentionBlock
 
 
 class VaceWan22CodexModel(torch.nn.Module):
-    """Minimal Wan2.2-TI2V-5B VACE branch for 144-channel latent controls.
+    """Minimal Wan2.2-TI2V-5B VACE branch for channel-concatenated controls.
 
-    The intended control tensor is channel-concatenated
-    [ray_o_latents, ray_d_latents, action_map_latents], where each part is
-    encoded by Wan2.2 VAE and has 48 channels.
+    Common control layouts are 144 channels (ray/action all VAE-encoded),
+    54 channels (action latent plus 3-channel raw rays), and 72 channels
+    (action latent plus 12-channel stack4 raw rays).
     """
 
     def __init__(
@@ -21,12 +21,14 @@ class VaceWan22CodexModel(torch.nn.Module):
         num_heads=24,
         ffn_dim=14336,
         eps=1e-6,
+        view_embedding_num_views=0,
     ):
         super().__init__()
         self.vace_layers = tuple(vace_layers)
         self.vace_in_dim = vace_in_dim
         self.dim = dim
         self.num_heads = num_heads
+        self.view_embedding_num_views = int(view_embedding_num_views or 0)
         self.vace_layers_mapping = {i: n for n, i in enumerate(self.vace_layers)}
 
         self.vace_blocks = torch.nn.ModuleList(
@@ -41,6 +43,35 @@ class VaceWan22CodexModel(torch.nn.Module):
             kernel_size=patch_size,
             stride=patch_size,
         )
+        self.view_embedding = (
+            torch.nn.Embedding(self.view_embedding_num_views, dim)
+            if self.view_embedding_num_views > 0
+            else None
+        )
+
+    def _add_view_embedding(self, patch_tokens):
+        if self.view_embedding is None:
+            return patch_tokens
+        if patch_tokens.shape[3] % self.view_embedding_num_views != 0:
+            raise ValueError(
+                f"Patch-token height {patch_tokens.shape[3]} is not divisible by "
+                f"view_embedding_num_views={self.view_embedding_num_views}."
+            )
+        _, channels, _, height, _ = patch_tokens.shape
+        # print(f'Adding view embedding: patch_tokens shape {patch_tokens.shape}')
+        # [1, 3072, 4, 30, 16]
+        rows_per_view = height // self.view_embedding_num_views
+        # 30  // 3 = 10
+        view_ids = torch.arange(height, device=patch_tokens.device) // rows_per_view
+        # print(f'View IDs shape: {view_ids.shape}, values: {view_ids}')
+        # [0, 0, ..., 1, 1, ..., 2, 2, ...] with shape [30]
+        view_emb = self.view_embedding(view_ids).to(dtype=patch_tokens.dtype)
+        # print(f'View embedding shape: {view_emb.shape}')
+        # [30, 3072]
+        view_emb = view_emb.transpose(0, 1).reshape(1, channels, 1, height, 1)
+        # print(f'View embedding reshaped for addition: {view_emb.shape}')
+        # [1, 3072, 1, 30, 1]
+        return patch_tokens + view_emb
 
     def init_from_dit(self, dit):
         """Copy matching transformer block weights from the Wan2.2 DiT."""
@@ -79,9 +110,7 @@ class VaceWan22CodexModel(torch.nn.Module):
             raise ValueError(
                 f"Expected vace_context with {self.vace_in_dim} channels, got {vace_context.shape[1]}."
             )
-        # vace_context: [1, 144, 5, 30, 14]
-        c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
-        # [[1, 3072, 5, 15, 7]]
+        c = [self._add_view_embedding(self.vace_patch_embedding(u.unsqueeze(0))) for u in vace_context]
         c = [u.flatten(2).transpose(1, 2) for u in c]
         # [[1, 525 = 5 * 15 * 7, 3072]]
         c = torch.cat(

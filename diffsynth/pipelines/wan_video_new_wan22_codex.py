@@ -11,11 +11,15 @@ from ..utils import PipelineUnit
 
 
 class WanVideoUnit_Wan22CodexVACE144(PipelineUnit):
-    """Build 144-channel Wan2.2 VACE controls from ray/action maps.
+    """Build Wan2.2 Codex VACE controls from ray/action maps.
 
-    This unit intentionally does not append a mask. It encodes:
-    ray_map_o -> 48 channels, ray_map_d -> 48 channels, action_map/vace_video
-    -> 48 channels, then concatenates them into vace_context.
+    Compatible modes:
+    - vace_in_dim=144: VAE-encode ray_map_o, ray_map_d, and action_map/vace_video
+      into 48 channels each.
+    - vace_in_dim=54: VAE-encode only action_map/vace_video into 48 channels,
+      then concatenate raw float ray_map_o and ray_map_d tensors with 3 channels each.
+    - vace_in_dim=72: same as 54, but each ray tensor stacks four source frames
+      per Wan VAE temporal slot, so ray_map_o and ray_map_d have 12 channels each.
     """
 
     def __init__(self):
@@ -45,8 +49,7 @@ class WanVideoUnit_Wan22CodexVACE144(PipelineUnit):
                 latents = latents.unsqueeze(0)
             if latents.ndim != 5:
                 raise ValueError(f"{name} tensor must have 4 or 5 dims, got {tuple(latents.shape)}.")
-            raise NotImplementedError("暂时不支持直接输入ray/action latent tensor，必须输入原始视频/图像/动作图并通过VAE编码成latent。")
-            return latents
+            raise NotImplementedError("vace_in_dim=144 expects raw image/video conditions and VAE-encodes them.")
         video = pipe.preprocess_video(value)
         return pipe.vae.encode(
             video,
@@ -55,6 +58,22 @@ class WanVideoUnit_Wan22CodexVACE144(PipelineUnit):
             tile_size=tile_size,
             tile_stride=tile_stride,
         ).to(dtype=pipe.torch_dtype, device=pipe.device)
+
+    def _as_raw_ray_latents(self, pipe, value, name, expected_t_hw, expected_channels):
+        if value is None:
+            raise ValueError(f"{name} is required for Wan2.2 Codex VACE raw-ray mode.")
+        if not torch.is_tensor(value):
+            raise ValueError(f"{name} must be a raw float tensor for raw-ray mode, got {type(value)!r}.")
+        latents = value.to(dtype=pipe.torch_dtype, device=pipe.device)
+        if latents.ndim == 4:
+            latents = latents.unsqueeze(0)
+        if latents.ndim != 5:
+            raise ValueError(f"{name} tensor must have 4 or 5 dims, got {tuple(latents.shape)}.")
+        if latents.shape[1] != expected_channels:
+            raise ValueError(f"{name} must have {expected_channels} channels in raw-ray mode, got {latents.shape[1]}.")
+        if tuple(latents.shape[2:]) != tuple(expected_t_hw):
+            raise ValueError(f"{name} shape {tuple(latents.shape[2:])} must match action latent shape {tuple(expected_t_hw)}.")
+        return latents
 
     def process(
         self,
@@ -79,27 +98,33 @@ class WanVideoUnit_Wan22CodexVACE144(PipelineUnit):
             raise ValueError("Wan2.2 Codex VACE requires ray_map_o, ray_map_d, and action_map or vace_video.")
 
         pipe.load_models_to_device(["vae"])
-        ray_o_latents = self._as_latents(pipe, ray_map_o, "ray_map_o", tiled, tile_size, tile_stride) # [1, 48, T', H', W']
-        ray_d_latents = self._as_latents(pipe, ray_map_d, "ray_map_d", tiled, tile_size, tile_stride)
-        action_latents = self._as_latents(pipe, action_source, "action_map/vace_video", tiled, tile_size, tile_stride)
-        shapes = {tuple(u.shape[2:]) for u in (ray_o_latents, ray_d_latents, action_latents)}
-        # {}会去重，如果去重后不止一个shape，说明ray/action latent的时间/空间维度不匹配，无法拼接成VACE输入了
-        if len(shapes) != 1:
-            raise ValueError(
-                "ray/action latent temporal-spatial shapes must match, got "
-                f"{ray_o_latents.shape}, {ray_d_latents.shape}, {action_latents.shape}."
-            )
-        z_dim = getattr(pipe.vae, "z_dim", getattr(pipe.vae.model, "z_dim", 48))
-        for name, latents in (
-            ("ray_map_o", ray_o_latents),
-            ("ray_map_d", ray_d_latents),
-            ("action_map/vace_video", action_latents),
-        ):
-            if latents.shape[1] != z_dim:
-                raise ValueError(f"{name} should have {z_dim} channels after VAE encode, got {latents.shape[1]}.")
-
-        vace_context = torch.cat((ray_o_latents, ray_d_latents, action_latents), dim=1)
         expected_in_dim = getattr(pipe.vace, "vace_in_dim", 144)
+        action_latents = self._as_latents(pipe, action_source, "action_map/vace_video", tiled, tile_size, tile_stride)
+        z_dim = getattr(pipe.vae, "z_dim", getattr(pipe.vae.model, "z_dim", 48))
+        if action_latents.shape[1] != z_dim:
+            raise ValueError(f"action_map/vace_video should have {z_dim} channels after VAE encode, got {action_latents.shape[1]}.")
+
+        if expected_in_dim in (z_dim + 6, z_dim + 24):
+            expected_ray_channels = 3 if expected_in_dim == z_dim + 6 else 12
+            ray_o_latents = self._as_raw_ray_latents(pipe, ray_map_o, "ray_map_o", action_latents.shape[2:], expected_ray_channels)
+            ray_d_latents = self._as_raw_ray_latents(pipe, ray_map_d, "ray_map_d", action_latents.shape[2:], expected_ray_channels)
+            vace_context = torch.cat((action_latents, ray_o_latents, ray_d_latents), dim=1)
+        elif expected_in_dim == z_dim * 3:
+            ray_o_latents = self._as_latents(pipe, ray_map_o, "ray_map_o", tiled, tile_size, tile_stride)
+            ray_d_latents = self._as_latents(pipe, ray_map_d, "ray_map_d", tiled, tile_size, tile_stride)
+            shapes = {tuple(u.shape[2:]) for u in (ray_o_latents, ray_d_latents, action_latents)}
+            if len(shapes) != 1:
+                raise ValueError(
+                    "ray/action latent temporal-spatial shapes must match, got "
+                    f"{ray_o_latents.shape}, {ray_d_latents.shape}, {action_latents.shape}."
+                )
+            for name, latents in (("ray_map_o", ray_o_latents), ("ray_map_d", ray_d_latents)):
+                if latents.shape[1] != z_dim:
+                    raise ValueError(f"{name} should have {z_dim} channels after VAE encode, got {latents.shape[1]}.")
+            vace_context = torch.cat((ray_o_latents, ray_d_latents, action_latents), dim=1)
+        else:
+            raise ValueError(f"Unsupported VACE input dim {expected_in_dim}; expected {z_dim + 6}, {z_dim + 24}, or {z_dim * 3}.")
+
         if vace_context.shape[1] != expected_in_dim:
             raise ValueError(f"Expected VACE input dim {expected_in_dim}, got {vace_context.shape[1]}.")
         return {"vace_context": vace_context, "vace_global_context": None, "vace_scale": vace_scale}

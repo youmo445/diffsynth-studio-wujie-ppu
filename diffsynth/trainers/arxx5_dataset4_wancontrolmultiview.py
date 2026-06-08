@@ -39,6 +39,25 @@ except ImportError:
     from arxx5_urdf_fk import left_fk, right_fk
 
 CAMERAS = ("head", "left_wrist", "right_wrist")
+CAMERA_NAME_ALIASES = {
+    "head": "head",
+    "base_0_rgb": "head",
+    "observation.images.head": "head",
+    "observation.images.base_0_rgb": "head",
+    "left_wrist": "left_wrist",
+    "left_wrist_0_rgb": "left_wrist",
+    "observation.images.left_wrist": "left_wrist",
+    "observation.images.left_wrist_0_rgb": "left_wrist",
+    "right_wrist": "right_wrist",
+    "right_wrist_0_rgb": "right_wrist",
+    "observation.images.right_wrist": "right_wrist",
+    "observation.images.right_wrist_0_rgb": "right_wrist",
+}
+CAMERA_VIDEO_KEY_CANDIDATES = {
+    "head": ("head", "base_0_rgb"),
+    "left_wrist": ("left_wrist", "left_wrist_0_rgb"),
+    "right_wrist": ("right_wrist", "right_wrist_0_rgb"),
+}
 ColorListLeft = [(0, 0, 255), (255, 255, 0), (0, 255, 255)]
 ColorListRight = [(255, 0, 255), (255, 0, 0), (0, 255, 0)]
 EndEffectorPts = np.array([[0,0,0,1],[0.1,0,0,1],[0,0.1,0,1],[0,0,0.1,1]], dtype=np.float32)
@@ -49,6 +68,29 @@ FIXED_AXIS_MAPS: Dict[str, np.ndarray] = {
     "left_wrist": np.array([[0.0,-1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,-1.0]], dtype=np.float64),
     "right_wrist": np.array([[0.0,-1.0,0.0],[-1.0,0.0,0.0],[0.0,0.0,-1.0]], dtype=np.float64),
 }
+
+
+def canonical_camera_name(name: str) -> str:
+    name = str(name)
+    if name not in CAMERA_NAME_ALIASES:
+        raise ValueError(f"Unsupported camera name: {name}. Supported names/aliases: {sorted(CAMERA_NAME_ALIASES)}")
+    return CAMERA_NAME_ALIASES[name]
+
+
+def camera_video_key_candidates(canonical_name: str, requested_name: Optional[str] = None) -> Tuple[str, ...]:
+    canonical_name = canonical_camera_name(canonical_name)
+    candidates: List[str] = []
+    if requested_name is not None:
+        requested_name = str(requested_name)
+        if requested_name.startswith("observation.images."):
+            requested_name = requested_name[len("observation.images.") :]
+        candidates.append(requested_name)
+    candidates.extend(CAMERA_VIDEO_KEY_CANDIDATES[canonical_name])
+    out = []
+    for item in candidates:
+        if item not in out:
+            out.append(item)
+    return tuple(out)
 
 
 def load_json(path: Path) -> dict:
@@ -148,12 +190,13 @@ def transform_to_pose_qwxyz(T: np.ndarray) -> np.ndarray:
 #     return (v - lo) / (hi - lo) * 120.0
 def normalize_to_0_120(v: np.ndarray) -> np.ndarray:
     """
-    Normalize gripper value from fixed physical/statistical range [0, 3] to [0, 120].
+    Normalize ARXX5/OpenPI gripper values to [0, 120] for control-map colors.
 
-    This makes gripper colors comparable across episodes.
+    The physical gripper range from the low-level infra is [0, 0.082]; values
+    outside this range are clipped before color mapping.
     """
     v = np.asarray(v, dtype=np.float32)
-    lo, hi = 0.0, 0.082
+    lo, hi = 0.0, 0.0820
     return np.clip((v - lo) / (hi - lo), 0.0, 1.0) * 120.0
 
 def make_abs_actions_from_poses(left_pose_qwxyz: np.ndarray, right_pose_qwxyz: np.ndarray, state: np.ndarray) -> np.ndarray:
@@ -310,6 +353,7 @@ def load_calib_extrinsics(head_left_calib: Path, head_right_calib: Path, left_ca
 def make_center_base_transforms(extr: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
     T_br2bl = extr["T_br2bl"]
     center_origin_in_left = 0.5 * T_br2bl[:3, 3]
+    # 原点相对于左臂坐标系的xyz
     T_center2bl = np.eye(4, dtype=np.float64)
     T_center2bl[:3, 3] = center_origin_in_left
     T_bl2center = invert_transform(T_center2bl)
@@ -592,6 +636,8 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
         camera_names: Optional[Sequence[str]] = None,
         camera_sample_mode: str = "all",
         camera_axis_mode: str = "identity",
+        intrinsic_source_height: int = 480,
+        intrinsic_source_width: int = 640,
         head_left_calib: str = "/mnt/data/zsq/outputs/calib_eye_to_hand_head_left/result_eye_to_hand.json",
         head_right_calib: str = "/mnt/data/zsq/outputs/calib_eye_to_hand_head_right/result_eye_to_hand.json",
         left_calib: str = "/mnt/data/zsq/outputs/calib_eye_in_hand_left/result_eye_in_hand.json",
@@ -634,9 +680,19 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
         self.vae_temporal_downsample = 4
         self.resize_to = resize_to
         self.type = dataset_type
-        self.camera_names = list(camera_names)
+        requested_camera_names = list(camera_names)
+        self.camera_names = [canonical_camera_name(cam) for cam in requested_camera_names]
+        if len(set(self.camera_names)) != len(self.camera_names):
+            raise ValueError(f"Duplicated canonical camera names after alias mapping: {requested_camera_names} -> {self.camera_names}")
+        self.camera_video_key_candidates = {
+            canonical: camera_video_key_candidates(canonical, requested)
+            for canonical, requested in zip(self.camera_names, requested_camera_names)
+        }
+        self.requested_camera_names = requested_camera_names
         self.camera_sample_mode = camera_sample_mode
         self.camera_axis_mode = camera_axis_mode
+        self.intrinsic_source_height = int(intrinsic_source_height)
+        self.intrinsic_source_width = int(intrinsic_source_width)
         self.prompt = prompt
         self.intrinsics = get_color_intrinsics()
         self.extr = load_calib_extrinsics(Path(head_left_calib), Path(head_right_calib), Path(left_calib), Path(right_calib))
@@ -676,7 +732,12 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
 
         self.total_samples = len(self.sample_indices)
         self.length = self.total_samples * self.repeat
-        print(f"[Arxx5Dataset] base={self.base_path}, fps={fps}, target_hz={target_hz}, step={self.downsample_step}, episodes={len(self.episode_info)}, samples={self.total_samples}, traj=fk_action_per_camera, raymap=center_base")
+        print(
+            f"[Arxx5Dataset] base={self.base_path}, fps={fps}, target_hz={target_hz}, step={self.downsample_step}, "
+            f"episodes={len(self.episode_info)}, samples={self.total_samples}, cameras={self.camera_names}, "
+            f"requested_cameras={self.requested_camera_names}, intrinsic_source=({self.intrinsic_source_height},{self.intrinsic_source_width}), "
+            f"traj=fk_action_per_camera, raymap=center_base"
+        )
 
     def _discover_episodes(self) -> List[dict]:
         data_dir = self.base_path / "data"
@@ -689,9 +750,22 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
                 continue
             episode_index = int(m.group(1))
             chunk = parquet_path.parent.name
-            video_paths = {cam: self.base_path / "videos" / chunk / f"observation.images.{cam}" / f"episode_{episode_index:06d}.mp4" for cam in CAMERAS}
+            video_paths = {}
+            video_keys = {}
+            for cam in CAMERAS:
+                candidates = self.camera_video_key_candidates.get(cam, camera_video_key_candidates(cam))
+                for video_key in candidates:
+                    video_path = self.base_path / "videos" / chunk / f"observation.images.{video_key}" / f"episode_{episode_index:06d}.mp4"
+                    if video_path.exists():
+                        video_paths[cam] = video_path
+                        video_keys[cam] = video_key
+                        break
+                if cam not in video_paths:
+                    video_key = candidates[0]
+                    video_paths[cam] = self.base_path / "videos" / chunk / f"observation.images.{video_key}" / f"episode_{episode_index:06d}.mp4"
+                    video_keys[cam] = video_key
             if all(video_paths[cam].exists() for cam in self.camera_names):
-                out.append({"episode_index": episode_index, "parquet_path": parquet_path, "video_paths": video_paths})
+                out.append({"episode_index": episode_index, "parquet_path": parquet_path, "video_paths": video_paths, "video_keys": video_keys})
         return out
 
     def _load_episode_action(self, parquet_path: Path) -> np.ndarray:
@@ -714,6 +788,7 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
             "episode_index": ep["episode_index"],
             "parquet_path": ep["parquet_path"],
             "video_paths": ep["video_paths"],
+            "video_keys": ep.get("video_keys", {}),
             "ds_indices": raw_idx,
             "T_ds": len(raw_idx),
             "traj_actions_by_cam": traj_actions_by_cam,
@@ -799,7 +874,13 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
                 out_h, out_w = self.resize_to
             else:
                 out_h, out_w = ori_h, ori_w
-            K = scale_intrinsic(self.intrinsics[cam], ori_h, ori_w, out_h, out_w)
+            K = scale_intrinsic(
+                self.intrinsics[cam],
+                self.intrinsic_source_height,
+                self.intrinsic_source_width,
+                out_h,
+                out_w,
+            )
 
             traj_actions = info["traj_actions_by_cam"][cam][frame_ids]
             traj_w2c_seq = info["traj_w2c_by_cam"][cam]
@@ -864,6 +945,8 @@ class Arxx5Dataset4Wancontrolmultiview(torch.utils.data.Dataset):
             "frame_ids_ds": frame_ids.tolist(),
             "frame_ids_raw": [int(info["ds_indices"][int(fid)]) for fid in frame_ids],
             "camera_names": active_cams,
+            "camera_video_keys": {cam: info.get("video_keys", {}).get(cam, cam) for cam in active_cams},
+            "intrinsic_source_size": [self.intrinsic_source_height, self.intrinsic_source_width],
             "traj_map_frame": "fk_action_per_camera_actions_and_fk_action_per_camera_w2c",
             "raymap_frame": "center_base_midpoint_between_left_and_right_bases",
             "traj_source": info.get("traj_source", "fk_action"),
